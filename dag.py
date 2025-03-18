@@ -7,18 +7,12 @@ from typing import Any, Iterable, Sequence
 from dataclasses import field, dataclass
 from enum import Enum
 
+import yt
+
+from dagrun import RunState, DagRun
+
 import attrs
 import os
-
-
-class TaskState(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-    def __str__(self) -> str:
-        return self.value
 
 
 def _build_dag_from_spec(spec: dict, work_dir: str = None) -> DAG:
@@ -62,16 +56,11 @@ def _build_dag_from_spec(spec: dict, work_dir: str = None) -> DAG:
 class DAG:
     dag_id: str = attrs.field(validator=attrs.validators.instance_of(str))
     default_args: dict[str, Any] = attrs.field(factory=dict, validator=attrs.validators.instance_of(dict))
-    start_date: datetime | None = attrs.field(default=None)
-    end_date: datetime | None = attrs.field(default=None)
 
     spec: dict = attrs.field(validator=attrs.validators.instance_of(dict))
     work_dir: str = attrs.field(validator=attrs.validators.instance_of(str))
 
     task_dict: dict[str, DAGNode] = attrs.field(factory=dict, init=False)
-
-    Graph: dict[str, set[str]] = attrs.field(factory=dict, init=False)
-    ts: TopologicalSorter = attrs.field(init=False)
 
     def __repr__(self):
         return f"<DAG: {self.dag_id}>"
@@ -93,16 +82,6 @@ class DAG:
         raise RuntimeError()
 
     def add_task(self, task: DAGNode) -> None:
-        if not task.start_date:
-            task.start_date = self.start_date
-        elif self.start_date:
-            task.start_date = max(self.start_date, task.start_date)
-
-        if not task.end_date:
-            task.end_date = self.end_date
-        elif self.end_date:
-            task.end_date = min(self.end_date, task.end_date)
-
         if task.node_id in self.task_dict and self.task_dict[task.node_id] is not task:
             raise RuntimeError()
         else:
@@ -113,23 +92,28 @@ class DAG:
         for task in tasks:
             self.add_task(task)
 
-    def build(self) -> None:
-        graph: dict[str, set[str]] = {}
-        for task_id, task in self.task_dict.items():
-            graph[task_id] = task.preceding_task_ids
-        self.ts = TopologicalSorter(graph)
-        self.ts.prepare()
-        self.Graph = graph
+    def create_dagrun(
+            self,
+            run_id: str,
+            yt_client: yt.YtClient,
+            start_date: datetime | None = None,
+            state: RunState | None = None
+    ) -> DagRun:
+        dagrun = DagRun(
+            dag_id=self.dag_id,
+            run_id=run_id,
+            start_date=start_date,
+            state=state,
+            yt_client=yt_client
+        )
+        dagrun.dag = self
+        dagrun.verify(yt_client=yt_client)
+        return dagrun
 
-    def complete_task(self, task_id: str) -> None:
-        if task_id in self.task_dict:
-            self.ts.done(task_id)
 
 
 class DAGNode:
     dag: DAG | None
-    start_date: datetime | None
-    end_date: datetime | None
     preceding_task_ids: set[str]
     succeeding_task_ids: set[str]
 
@@ -192,7 +176,7 @@ class DAGNode:
 @dataclass(kw_only=True)
 class Task(DAGNode):
     task_id: str
-    task_name: str
+    # task_name: str
 
     inlets: list[Any] = field(default_factory=list)
     outlets: list[Any] = field(default_factory=list)
@@ -203,7 +187,7 @@ class Task(DAGNode):
             self,
             *,
             task_id: str,
-            task_name: str,
+            # task_name: str,
             start_date: datetime | None = None,
             end_date: datetime | None = None,
             dag: DAG | None = None,
@@ -212,7 +196,7 @@ class Task(DAGNode):
             outlets: Any | None = None
     ):
         self.task_id = task_id
-        self.task_name = task_name
+        # self.task_name = task_name
         super().__init__()
 
         self.start_date = start_date
