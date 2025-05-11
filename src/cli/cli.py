@@ -1,7 +1,7 @@
-from typing import NamedTuple, Iterable, Callable, Any
+from typing import Iterable, Any, NamedTuple, Callable
 import argparse
 
-from flow_runner import init, run
+from .commands import scheduler
 
 
 class CLIArg:
@@ -23,7 +23,7 @@ class CLICommand(NamedTuple):
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='flow_runner', description='Flow Runner CLI')
     subparsers = parser.add_subparsers(dest='subcommand', required=True)
-    command_dict = {sp.name: sp for sp in commands}
+    command_dict = {sp.name: sp for sp in commands_}
     for _, sub in sorted(command_dict.items()):
         if isinstance(sub, CLICommand):
             sub_proc = subparsers.add_parser(sub.name, help=sub.description)
@@ -33,23 +33,11 @@ def get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-commands = (
+commands_ = (
     CLICommand(
-        name="init",
-        description="Initialize database.",
-        func=init,
-        args=(
-            CLIArg(
-                flags=["--yt-proxy"],
-                help='yt proxy for YTsaurus client',
-                required=False
-            ),
-        )
-    ),
-    CLICommand(
-        name="run",
+        name="scheduler",
         description='Run dag',
-        func=run,
+        func=scheduler,
         args=(
             CLIArg(
                 flags=["--spec"],
@@ -60,7 +48,12 @@ commands = (
                 flags=["--work-dir"],
                 help="Working directory for the pipeline.",
                 required=False
-            )
+            ),
+            CLIArg(
+                flags=["--yt-proxy"],
+                help='yt proxy for YTsaurus client',
+                required=False
+            ),
         )
-    )
+    ),
 )
