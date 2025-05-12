@@ -18,7 +18,7 @@ class Job:
 
     state: str#JobState
 
-    def __init__(self, executor: Executor):
+    def __init__(self, executor: Executor | None = None):
         self._executor = executor
         self.id = str(uuid.uuid4())
 

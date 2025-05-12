@@ -12,10 +12,8 @@ from task_run import TaskRun
 import yt.wrapper as yt
 
 
-
 @yt.yt_dataclass
 class DagRun:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex)
     dag_id: str
     run_id: str
 
@@ -25,6 +23,8 @@ class DagRun:
     updated_at: datetime
 
     state: str # DagRunState
+
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def __init__(
             self,

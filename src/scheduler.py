@@ -75,6 +75,7 @@ class Scheduler:
                 time.sleep(self._scheduler_idle_sleep_time)
 
     def _do_scheduling(self) -> int:
+        print("_do_scheduling")
         self._create_dagruns_for_dags() # создает даграны
 
         self._start_queued_dagruns() # запуск и проверка существующих дагран
@@ -83,15 +84,16 @@ class Scheduler:
 
         self._schedule_all_dag_runs(dag_runs)
 
-        total_free_executor_slots = self.job.executor.slots_available # TODO
-        if total_free_executor_slots <= 0:
-            num_queued = 0
-        else:
-            num_queued = self._critical_section_enqueue_task_runs() # переводим задачи в QUEUED; отправляем в executor
+        # total_free_executor_slots = self.job.executor.slots_available # TODO
+        # if total_free_executor_slots <= 0:
+        #     num_queued = 0
+        # else:
+        num_queued = self._critical_section_enqueue_task_runs() # переводим задачи в QUEUED; отправляем в executor
 
         return num_queued
 
     def _create_dagruns_for_dags(self):
+        print("_create_dagruns_for_dags")
         all_dags_needing_dag_runs = DagEntity.dags_needing_dagruns(self.yt_client)
         self._create_dag_runs(all_dags_needing_dag_runs)
 
@@ -113,6 +115,7 @@ class Scheduler:
                 continue
 
     def _start_queued_dagruns(self) -> None:
+        print("_start_queued_dagruns")
         dag_runs: list[DagRun] = DagRun.get_queued_dag_runs_to_set_running(self.yt_client)
 
         for dag_run in dag_runs:
@@ -165,7 +168,7 @@ class Scheduler:
                 join {'//home/dag_model'} as dm
                     on tr.dag_id = dm.dag_id
                     and dm.is_paused = false
-                where tr.state = 'scheduled'
+                where tr.state = {TaskRunState.SCHEDULED}
                 """
 
             if starved_tasks:
@@ -234,6 +237,4 @@ class Scheduler:
                 tr.set_state(None, yt_client=self.yt_client)
                 continue
 
-            executor.queue_command( # TODO
-                tr
-            )
+            executor.queue_task_run(tr)

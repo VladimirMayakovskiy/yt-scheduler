@@ -8,7 +8,7 @@ import yaml
 
 from dag_entity import DagEntity
 from dag_run import DagRun
-from operator import BaseOperator, operators
+from ytoperator import BaseOperator, operators
 from state import DagRunState
 
 import yt.wrapper as yt
@@ -40,13 +40,15 @@ class DAG:
             if dag.work_dir is not None:
                 inlets = [os.path.join(dag.work_dir, path) for path in inlets]
                 outlets = [os.path.join(dag.work_dir, path) for path in outlets]
+                params['input_table_paths'] = inlets
+                params['output_table_paths'] = outlets
 
             operation = params.get("operation", "")
             operator_cls = operators.get(operation)
             if not operator_cls:
                 raise ValueError(f"Unknown operator type: {operation}")
 
-            dag.task_dict[step_name] = operator_cls(task_id=step_name, dag=dag, inlets=inlets, outlets=outlets)
+            dag.task_dict[step_name] = operator_cls(task_id=step_name, dag_id=dag.dag_id, spec=params)
         return dag
 
     def create_dagrun(
