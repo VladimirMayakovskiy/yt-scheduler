@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import itertools
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import uuid
 
-from dagrun import DagRun
-from operator import BaseOperator
+if TYPE_CHECKING:
+    from dag_run import DagRun
+
+
+from ytoperator import BaseOperator
 from state import TaskRunState
 
 import yt.wrapper as yt
 
+class TaskRunKey:
+    id: str
+    task_id: str
+    dag_id: str
+    run_id: str
 
-@yt.yt_dataclass
+
 class TaskRun:
     id: str
     task_id: str
@@ -106,3 +115,7 @@ class TaskRun:
             yt_client.insert_rows("//home/task_run", self)
 
         return True
+
+    @property
+    def key(self) -> TaskRunKey:
+        return TaskRunKey(self.id, self.dag_id, self.task_id, self.run_id)
