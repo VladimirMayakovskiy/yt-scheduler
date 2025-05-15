@@ -33,11 +33,12 @@ def run_job(
         job.complete_execution(yt_client=yt_client)
 
 def _get_current_dag(dag_id: str, yt_client: yt.YtClient) -> DAG | None:
+    print(_get_current_dag.__name__)
     de = DagEntity.get(dag_id=dag_id, yt_client=yt_client)
     # создаем dag
     if not de:
         return None
-    return DAG.from_dag_entity(de)
+    return DAG.from_dag_entity(de, yt_client)
 
 class Scheduler:
     def __init__(
@@ -98,29 +99,34 @@ class Scheduler:
         self._create_dag_runs(all_dags_needing_dag_runs)
 
     def _create_dag_runs(self, dag_entities: list[DagEntity]) -> None:
+        print("_create_dag_runs")
         for de in dag_entities:
             dag = _get_current_dag(dag_id=de.dag_id, yt_client=self.yt_client)
             if not dag:
                 continue
+            print("_create_dag_runs 222")
 
             try:
                 dag.create_dagrun(
-                    dag=dag,
+                    # dag=dag,
                     yt_client=self.yt_client,
                     state=DagRunState.QUEUED,
                     creating_job_id=self.job.id,
                     start_date=datetime.utcnow(),
                 )
-            except Exception:
+            except Exception as e:
+                print(e)
                 continue
 
     def _start_queued_dagruns(self) -> None:
         print("_start_queued_dagruns")
         dag_runs: list[DagRun] = DagRun.get_queued_dag_runs_to_set_running(self.yt_client)
 
+        print("dag_runs: ", dag_runs)
         for dag_run in dag_runs:
             dag_run.state = DagRunState.RUNNING
-            dag_run.start_date = datetime.utcnow()
+            dag_run.start_date = datetime.utcnow().isoformat()
+        print("end _start_queued_dagruns")
 
     def _schedule_all_dag_runs(
             self,
@@ -180,9 +186,11 @@ class Scheduler:
 
             query += f"limit {max_trs}"
 
-            with yt.Transaction():
+            if self.yt_client.exists("//home/task_run") and self.yt_client.exists("//home/dag_run") and self.yt_client.exists("//home/dag_model"):
                 rows = list(self.yt_client.select_rows(query))
-                task_runs_to_examine = [TaskRun(**row) for row in rows]
+            else:
+                rows = []
+            task_runs_to_examine = [TaskRun(**row) for row in rows]
 
 
             if not task_runs_to_examine:

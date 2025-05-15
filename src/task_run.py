@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import uuid
 
@@ -21,22 +21,23 @@ class TaskRunKey:
     dag_id: str
     run_id: str
 
-
+@yt.yt_dataclass
 class TaskRun:
     id: str
     task_id: str
     dag_id: str
     run_id: str
 
-    start_date: datetime
-    end_date: datetime
-    updated_at: datetime
+    scheduled_at: str
+    start_date: Optional[str]
+    end_date: Optional[str]
+    # updated_at: datetime
 
-    state: TaskRunState
+    state: str # TaskRunState
 
-    task: BaseOperator | None = None
+    # task: BaseOperator | None = None
 
-    executor: str
+    # executor: str
 
     def __init__(
             self,
@@ -51,11 +52,18 @@ class TaskRun:
 
         self.run_id = run_id
 
-        if not self.id:
-            self.id = str(uuid.uuid4())
+
+        self.id = str(uuid.uuid4())
+
+        self.scheduled_at = datetime.utcnow().isoformat()
 
         if state:
             self.state = state
+        else:
+            self.state = ""
+
+        self.start_date = None
+        self.end_date = None
 
     @staticmethod
     def filter_for_trs(trs):

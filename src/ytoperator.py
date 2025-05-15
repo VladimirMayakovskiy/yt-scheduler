@@ -9,16 +9,19 @@ from state import TaskRunState
 if TYPE_CHECKING:
     from dag import DAG
 
+from dag_node import DAGNode
 
-class BaseOperator:
-    task_id: str
+
+class BaseOperator(DAGNode):
     dag_id: str
 
     spec: dict
     spec_path: str
 
     def __init__(self, task_id: str, dag_id: str, spec: dict):
-        self.task_id = task_id
+        print("INIT")
+        super().__init__(task_id)
+        # self.task_id = task_id
         self.dag_id = dag_id
         self.spec = spec
         self.spec_path = f"//home/specs/{dag_id}_{task_id}_{int(time.time())}.json"
@@ -29,10 +32,11 @@ class BaseOperator:
 
 class MapOperator(BaseOperator):
     def __init__(self, task_id: str, dag_id: str, spec: dict):
+        print("MAPOPERATOR")
         super().__init__(task_id, dag_id, spec)
-        self.binary = spec["mapper"]["command"]
-        self.input_tables  = spec["input_table_paths"]
-        self.output_tables = spec["output_table_paths"]
+        # self.binary = spec["mapper"]["command"]
+        # self.input_tables  = spec["input_table_paths"]
+        # self.output_tables = spec["output_table_paths"]
 
 
     def run_task(self, yt_client: yt.YtClient, result_queue, key):

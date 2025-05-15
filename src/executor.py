@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import multiprocessing
 import time
 from queue import Empty, Queue
@@ -71,14 +72,16 @@ class Executor:
             self.queued_tasks[task_run.key] = task_run.task
 
     def heartbeat(self) -> None:
+        print("Heartbeat")
         open_slots = self.parallelism - len(self.running)
         self.trigger_tasks(open_slots)
         self.sync()
 
     def trigger_tasks(self, open_slots: int) -> None:
-        queue = self.queued_tasks.items()
+        print("trigger_tasks")
+        queue = itertools.islice(self.queued_tasks.items(), open_slots)
 
-        for key, op in queue[:open_slots]:
+        for key, op in queue:
             del self.queued_tasks[key]
 
             if key not in self.running:

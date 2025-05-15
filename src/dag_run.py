@@ -1,103 +1,122 @@
 from __future__ import annotations
 
+import typing
 import uuid
-from dataclasses import field
+from dataclasses import field, asdict
 from datetime import datetime
 from typing import Optional
 
-# from src.dag import DAG
+if typing.TYPE_CHECKING:
+    from dag import DAG
 from state import DagRunState, TaskRunState
 from task_run import TaskRun
 
 import yt.wrapper as yt
+from yt.wrapper.schema import TableSchema
 
 
 @yt.yt_dataclass
 class DagRun:
+    id: str
     dag_id: str
     run_id: str
 
-    queued_at: Optional[datetime]
-    start_date: Optional[datetime]
-    end_date: Optional[datetime]
-    updated_at: datetime
+    start_date: Optional[str]
+    end_date: Optional[str]
+    # updated_at: datetime
 
     state: str # DagRunState
-
-    id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def __init__(
             self,
             *,
-            dag,
             dag_id: str,
             run_id: str,
-            queued_at: datetime | None = None,
-            start_date: datetime | None = None,
             state: DagRunState,
+            id: str | None = None,
+            dag: DAG | None = None,
+            start_date: datetime | str | None = None,
+            end_date: datetime | str | None = None,
             creating_job_id: int | None = None,
     ):
-        self.dag = dag # TODO
+        self.dag = dag
         self.dag_id = dag_id
         self.run_id = run_id
-        self.start_date = start_date
+        self.start_date = start_date.isoformat() if start_date is not None and isinstance(start_date, datetime) else start_date
+        self.end_date = end_date.isoformat() if end_date is not None and isinstance(end_date, datetime) else end_date
         self.state = state
-        if queued_at is not None:
-            self.queued_at = datetime.utcnow() if state == DagRunState.QUEUED else None
-        else:
-            self.queued_at = queued_at
         self.creating_job_id = creating_job_id
+        if id is not None:
+            self.id = id
+        else:
+            self.id = uuid.uuid4().hex
+        self.Graph: dict[str, set[str]] = {}
 
-        self.Graph: dict[str, set[str]] = {
+
+    def dag_run_prepare_for_execution(self, yt_client: yt.YtClient):
+        print("dag_run_prepare_for_execution")
+        self.Graph = {
             task.task_id: set(task.upstream_task_ids)
             for task in self.dag.tasks
         }
+        print("upstream_task_ids 2")
+        if not yt_client.exists("//home/dag_run"):
+            print("create table DAG_RUN")
+            yt_client.create("table", "//home/dag_run", attributes={"schema": TableSchema.from_row_type(DagRun) , "dynamic": True})
+            yt_client.mount_table("//home/dag_run", sync=True)
+        yt_client.insert_rows("//home/dag_run", [asdict(self)])
+        self.verify_integrity(yt_client)
+
 
     @classmethod
     def get_running_dag_runs_to_examine(cls, yt_client: yt.YtClient) -> list["DagRun"]:
-        with yt_client.Transaction():
+        if yt_client.exists("//home/dag_run"): # and yt_client.exists("//home/dag_state"):
             rows = list(yt_client.select_rows(
                 f"""
                 dr.id as id,
                 dr.dag_id as dag_id,
                 dr.run_id as run_id,
                 dr.state as state,
-                dr.updated_at as updated_at,
                 dr.start_date as start_date,
                 dr.end_date as end_date,
-                dr.queued_at as queued_at,
                 from [{"//home/dag_run"}] as dr
-                join [{"//home/dag_state"}] as ds
-                    on ds.dag_id = dr.dag_id
-                    and ds.is_paused = false
-                where dr.state = "RUNNING"
-                limit 50
+                where dr.state = "{DagRunState.RUNNING}"
+                limit 1
                 """
             ))
+        else:
+            rows = []
         return [cls(**row) for row in rows]
 
     @classmethod
     def get_queued_dag_runs_to_set_running(cls, yt_client: yt.YtClient) -> list["DagRun"]:
-        with yt_client.Transaction(type="tablet"):
-            rows = list(yt_client.select_rows(
-                f"""
-                dr.id as id,
-                dr.dag_id as dag_id,
-                dr.run_id as run_id,
-                dr.state as state,
-                dr.updated_at as updated_at,
-                dr.start_date as start_date,
-                dr.end_date as end_date,
-                dr.queued_at as queued_at,
-                from [{"//home/dag_run"}] as dr
-                join [{"//home/dag_state"}] as ds
-                    on ds.dag_id = dr.dag_id
-                    and ds.is_paused = false
-                where dr.state = "QUEUED"
-                limit 50
-                """
-            ))
-        return [cls(**row) for row in rows]
+        print("get_queued_dag_runs_to_set_running")
+        if yt_client.exists("//home/dag_run") and yt_client.exists("//home/dag_state"):
+            try:
+                rows = list(yt_client.select_rows(
+                    f"""
+                    dr.id as id,
+                    dr.dag_id as dag_id,
+                    dr.run_id as run_id,
+                    dr.state as state,
+                    dr.start_date as start_date,
+                    dr.end_date as end_date
+                    from [{"//home/dag_run"}] dr
+                    where dr.state = "{DagRunState.QUEUED}"
+                    limit 1
+                    """
+                ))
+            except Exception as e:
+                print(e)
+                raise
+        else:
+            rows = []
+        print(rows)
+        try:
+            return [cls(**row) for row in rows]
+        except Exception as e:
+            print(e)
+            return []
 
     def update_state(
             self, yt_client: yt.YtClient
@@ -148,9 +167,14 @@ class DagRun:
         return [trs, schedulable_trs, unfinished_trs, finished_trs]
 
     def get_task_runs(self, yt_client: yt.YtClient):
-        return DagRun.fetch_task_runs(
-            dag_id=self.dag_id, run_id=self.run_id, task_ids=self.dag.task_ids, yt_client=yt_client
-        )
+        print("get_task_runs")
+        try:
+            return DagRun.fetch_task_runs(
+                dag_id=self.dag_id, run_id=self.run_id, task_ids=self.dag.task_ids, yt_client=yt_client
+            )
+        except Exception as e:
+            print(e)
+            raise
 
     def _get_ready_trs(
             self,
@@ -225,42 +249,56 @@ class DagRun:
 
     @staticmethod
     def fetch_task_runs(
-            self,
             yt_client: yt.YtClient,
             dag_id: str | None = None,
             run_id: str | None = None,
             task_ids: list[str] | None = None
     )  -> list[TaskRun] :
+        print("fetch_task_runs")
         cond = []
         if dag_id is not None:
-            cond.append(f"ti.dag_id = '{dag_id}'")
+            cond.append(f"tr.dag_id = '{dag_id}'")
         if run_id is not None:
-            cond.append(f"ti.run_id = '{run_id}'")
+            cond.append(f"tr.run_id = '{run_id}'")
         if task_ids is not None and task_ids:
             ids_list = ", ".join(f"'{tid}'" for tid in task_ids)
-            cond.append(f"ti.task_id in ({ids_list})")
+            print(ids_list)
+            cond.append(f"tr.task_id in ({ids_list})")
 
 
         where_clause = ""
         if cond:
             where_clause = "where " + " and ".join(cond)
-        rows = list(yt_client.select_rows(
-            f"""
-            select tr.*
-            from [{"//home/task_run"}] as tr
-            {where_clause}
-            """
-        ))
+        print(where_clause)
+        if yt_client.exists("//home/task_run"):
+            rows = []
+            # rows = list(yt_client.select_rows(
+            #     f"""
+            #     tr.*
+            #     from [{"//home/task_run"}] as tr
+            #     {where_clause}
+            #     """
+            # ))
+        else:
+            rows = []
 
         return [TaskRun(**row) for row in rows]
 
 
     def verify_integrity(self, yt_client: yt.YtClient) -> None:
+        print("verify_integrity")
         dag = self.dag
-        task_ids = {t.task_id for t in self.get_task_runs(yt_client)}
+        task_ids = {t.task_id for t in self.get_task_runs(yt_client)} #
+        print("verify_integrity 2")
+        print(dag.task_dict.values())
         tasks_to_create = [task for task in dag.task_dict.values() if task.task_id not in task_ids]
-        trs_to_create = [TaskRun(task, run_id=self.run_id) for task in tasks_to_create]
-        self._create_task_runs(self.dag_id, trs_to_create, yt_client=yt_client)
+        print("verify_integrity 3")
+        try:
+            trs_to_create = [TaskRun(task, run_id=self.run_id, dag_run=self, state=TaskRunState.SCHEDULED) for task in tasks_to_create]
+        except Exception as e:
+            print(e)
+            raise
+        self._create_task_runs(dag_id=self.dag_id, tasks=trs_to_create, yt_client=yt_client)
 
 
     def _create_task_runs(
@@ -269,5 +307,14 @@ class DagRun:
             tasks: list[TaskRun],
             yt_client: yt.YtClient,
     ) -> None:
-        with yt_client.Transaction():
-            yt_client.insert_rows("//home/task_run", tasks)
+        print("_create_task_runs")
+        try:
+            print(len(tasks))
+            if not yt_client.exists("//home/task_run"):
+                print("create table")
+                yt_client.create("table", "//home/task_run", attributes={"schema": TableSchema.from_row_type(TaskRun) , "dynamic": True})
+                yt_client.mount_table("//home/task_run", sync=True)
+            yt_client.insert_rows("//home/task_run", [asdict(task) for task in tasks])
+        except Exception as e:
+            print(e)
+            raise
