@@ -30,11 +30,9 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 def _add_commands(parser: argparse.ArgumentParser, commands: Iterable[CLICommand]):
-    print("here")
     subparsers = parser.add_subparsers(dest='subcommand', required=True)
     for cmd in commands:
         if isinstance(cmd, CLICommand):
-            print(cmd.name)
             sub_proc = subparsers.add_parser(cmd.name, help=cmd.description)
             for arg in cmd.args:
                 sub_proc.add_argument(*arg.flags, **arg.kwargs)

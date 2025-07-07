@@ -35,6 +35,7 @@ class TaskRun:
 
     state: str # TaskRunState
 
+    operation_id: str
     # task: BaseOperator | None = None
 
     # executor: str
@@ -46,6 +47,7 @@ class TaskRun:
             run_id: str | None = None,
             state: TaskRunState | None = None,
     ):
+        self.task = task
         self.dag_id = task.dag_id
         self.task_id = task.task_id
         self.dag_run = dag_run
@@ -109,7 +111,7 @@ class TaskRun:
         return " or ".join(filter_condition)
 
     def set_state(self, state: TaskRunState | None, yt_client: yt.YtClient) -> bool:
-        self.refresh_from_yt() # TODO
+        # self.refresh_from_yt() # TODO
         if self.state == state:
             return False
 
@@ -124,6 +126,6 @@ class TaskRun:
 
         return True
 
-    @property
-    def key(self) -> TaskRunKey:
-        return TaskRunKey(self.id, self.dag_id, self.task_id, self.run_id)
+    # @property
+    # def key(self) -> TaskRunKey:
+    #     return TaskRunKey(self.id, self.dag_id, self.task_id, self.run_id)

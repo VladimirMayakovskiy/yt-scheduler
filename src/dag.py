@@ -22,72 +22,79 @@ class DAG:
     # spec: dict
     work_dir: str
 
-    task_dict: dict[str, DAGNode]
+    task_dict: dict[str, DAGNode] # task_dict: dict[str, Operator]
+    upstream: dict[str, list[str]]
+    downstream: dict[str, list[str]]
 
-    @staticmethod
-    def from_dag_entity(de: DagEntity, yt_client: yt.YtClient):
+    @classmethod
+    def from_dag_entity(cls, de: DagEntity, yt_client: yt.YtClient):
         print("from_dag_entity")
-        dag = DAG()
+        dag = cls.__new__(cls)
 
-        spec_path = de.spec_path
-        spec = yaml.safe_load(yt_client.read_file(spec_path))
-
-        print("OK", spec)
-
-        dag.work_dir = de.work_dir
-        dag.task_dict = {}
         dag.dag_id = de.dag_id
-        steps = spec.get("steps", {})
-        print(steps)
-        for step_name, step_spec in steps.items():
-            print(step_name, step_spec)
-            params = step_spec
-            print("OK1.5")
-            inlets = params.pop('input_table_paths', [])
-            outlets = params.pop('output_table_paths', [])
+        dag.work_dir = de.work_dir
+        dag.task_dict: dict[str, DAGNode] = {}
 
-            print("OK2")
+        raw = yt_client.read_file(de.spec_path)
+        spec = yaml.safe_load(raw)
 
-            if dag.work_dir is not None:
-                inlets = [os.path.join(dag.work_dir, path) for path in inlets]
-                outlets = [os.path.join(dag.work_dir, path) for path in outlets]
-                params['input_table_paths'] = inlets
-                params['output_table_paths'] = outlets
+        outlets_producers: dict[str, list[BaseOperator]] = {} # TODO
+        for task_id, params in spec.get("steps", {}).items():
+            print(task_id, params)
+            cfg = dict(params)
+            inlets = cfg.pop('input_table_paths', [])
+            outlets = cfg.pop('output_table_paths', [])
 
-            print("OK3")
+            abs_inlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in inlets]
+            abs_outlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in outlets]
 
-            operation = params.get("operation", "")
+            cfg['input_table_paths'] = abs_inlets
+            cfg['output_table_paths'] = abs_outlets
+
+            operation = cfg.get("operation", "")
             operator_cls = operators.get(operation)
             print(operator_cls)
             if not operator_cls:
                 continue
                 # raise ValueError(f"Unknown operator type: {operation}")
 
-            print("OK4")
-            dag.task_dict[step_name] = operator_cls(task_id=step_name, dag_id=dag.dag_id, spec=spec)
-            print("OK5")
+            operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg)
+            dag.task_dict[task_id] = operator
+            print("OK from_dag_entity")
+
+            for outlet in abs_outlets:
+                outlets_producers.setdefault(outlet, []).append(operator)
+
+        #TODO upstreams, downstreams
+        for tid, op in dag.task_dict.items():
+            for inlet in op.inlets:
+                if producers := outlets_producers.get(inlet):
+                    op.set_upstream(producers)
+
+        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.tasks}
+        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.tasks}
         return dag
 
+    @staticmethod
     def create_dagrun(
-            self,
             *,
-            # dag: DAG,
+            dag: DAG,
             state: DagRunState,
             yt_client: yt.YtClient,
             start_date: datetime | None = None,
             creating_job_id: str | None = None,
     ) -> DagRun:
         print("create_dagrun")
-        run_id = f"{self.dag_id}__scheduled__{start_date.isoformat()}"
+        run_id = f"{dag.dag_id}__scheduled__{start_date.isoformat()}" # TODO
         run = DagRun(
-            dag=self,
-            dag_id=self.dag_id,
+            dag=dag,
+            dag_id=dag.dag_id,
             run_id=run_id,
             start_date=start_date,
             state=state,
             creating_job_id=creating_job_id,
         )
-        run.dag_run_prepare_for_execution(yt_client)
+        run.dag_run_prepare_for_execution(yt_client) #TODO а мб после этой строчки стейт должен меняться на queued
         # run.verify_integrity(yt_client=yt_client)
         return run
 
@@ -98,3 +105,11 @@ class DAG:
     @property
     def task_ids(self) -> list[str]:
         return list(self.task_dict.keys())
+
+    @property
+    def roots(self) -> list[DAGNode]: #TODO
+        return [self.task_dict.get(tid, None) for tid, ups in self.upstream.items() if not ups]
+
+    @property
+    def leaves(self) -> list[DAGNode]:
+        return [self.task_dict.get(tid, None) for tid, downs in self.downstream.items() if not downs]

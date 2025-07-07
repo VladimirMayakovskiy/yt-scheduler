@@ -21,12 +21,12 @@ class BaseOperator(DAGNode):
     def __init__(self, task_id: str, dag_id: str, spec: dict):
         print("INIT")
         super().__init__(task_id)
-        # self.task_id = task_id
+        self.task_id = task_id
         self.dag_id = dag_id
         self.spec = spec
         self.spec_path = f"//home/specs/{dag_id}_{task_id}_{int(time.time())}.json"
 
-    def run_task(self, yt_client: yt.YtClient, result_queue, key):
+    def run_operation(self, yt_client: yt.YtClient) -> str:
         raise NotImplementedError
 
 
@@ -39,25 +39,20 @@ class MapOperator(BaseOperator):
         # self.output_tables = spec["output_table_paths"]
 
 
-    def run_task(self, yt_client: yt.YtClient, result_queue, key):
+    def run_operation(self, yt_client: yt.YtClient) -> str:
         yt_client.create("file", self.spec_path, force=True)
         yt_client.write_file(self.spec_path, json.dumps(self.spec))
 
-        import multiprocessing
+        mapper = self.spec["mapper"]
+        input_tables = self.spec.get("input_table_paths", [])
+        output_tables = self.spec.get("output_table_paths", [])
 
-        def _run():
-            try:
-                yt_client.run_map(
-                    binary=self.binary,
-                    source_table=self.input_tables,
-                    destination_table=self.output_tables[0],
-                    spec=self.spec
-                )
-                result_queue.put((key, TaskRunState.SUCCESS))
-            except Exception:
-                result_queue.put((key, TaskRunState.FAILED))
-
-        p = multiprocessing.Process(target=_run, daemon=True)
-        p.start()
+        operation_id = yt_client.run_map(
+            mapper=mapper,
+            source_table=input_tables,
+            destination_table=output_tables[0],
+            spec=self.spec
+        )
+        return operation_id
 
 operators = {"map": MapOperator}

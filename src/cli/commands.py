@@ -10,8 +10,8 @@ from yt.wrapper.schema import TableSchema
 def scheduler(args):
     yt_client = yt.YtClient(proxy=args.yt_proxy)
 
-    job_runner = Scheduler(job = Job(), yt_client=yt_client)
-    run_job(job=job_runner.job, execute_callable=job_runner._execute, yt_client=yt_client)
+    scheduler = Scheduler(job = Job(), yt_client=yt_client)
+    run_job(job=scheduler.job, execute_callable=scheduler._execute, yt_client=yt_client)
 
 def add_dag(args):
     yt_client = yt.YtClient(proxy=args.yt_proxy)
@@ -28,7 +28,7 @@ def add_dag(args):
     cypress_spec_path = f"{work_dir}/spec.yaml"
     yt_client.write_file(cypress_spec_path, spec)
 
-    dag_id = f"dag_{uuid4().hex[:8]}" # args.dag_id or 
+    dag_id = f"dag_{uuid4().hex[:8]}" # args.dag_id or TODO
     row = DagEntityRow(dag_id=dag_id, is_paused=False, spec_path=cypress_spec_path, work_dir=work_dir)
 
     if not yt_client.exists("//home/dag_state"):

@@ -3,7 +3,7 @@ from enum import Enum
 class JobState(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
-    RESTARTING = "restarting"
+    # RESTARTING = "restarting"
     FAILED = "failed"
 
     def __str__(self) -> str:
@@ -20,7 +20,8 @@ class DagRunState(str, Enum):
 
 class TaskRunState(str, Enum):
     SCHEDULED = "scheduled" # задача  запланирована для запуска. Шедулер решил что можно запускать но пока еще не передал задачу в Экзекьютор
-    QUEUED = "queued" # задача поставлена в очередь Экзекьютором. Ожидает фактичесвкого запуска на исполнение
+    READY = "ready"
+    QUEUED = "queued" # задача поставлена в очередь Экзекьютора. Ожидает фактичесвкого запуска на исполнение
     RUNNING = "running" # задача активно выполняется
     SUCCESS = "success" # задача успешно завершилась
     FAILED = "failed"
