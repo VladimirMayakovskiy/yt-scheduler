@@ -36,36 +36,59 @@ class TaskRun:
     state: str # TaskRunState
 
     operation_id: str
+    # operation_id: Optional[str] = None
     # task: BaseOperator | None = None
 
     # executor: str
 
     def __init__(
             self,
-            task: BaseOperator,
-            dag_run: DagRun,
+            id: str | None = None,
+            task_id : str | None = None,
+            dag_id: str | None = None,
             run_id: str | None = None,
+            scheduled_at: str | None = None,
+            start_date: str | None = None,
+            end_date: str | None = None,
             state: TaskRunState | None = None,
+            operation_id: str | None = None,
+            task: BaseOperator | None = None,
+            dag_run: DagRun | None = None,
     ):
         self.task = task
-        self.dag_id = task.dag_id
-        self.task_id = task.task_id
-        self.dag_run = dag_run
+        self.dag_id = dag_id if dag_id else (task.dag_id if task else None)
+        self.task_id = task_id if task_id else (task.task_id if task else None)
+        # self.dag_run = dag_run
 
         self.run_id = run_id
 
 
-        self.id = str(uuid.uuid4())
+        self.id = id or str(uuid.uuid4())
 
-        self.scheduled_at = datetime.utcnow().isoformat()
+        self.scheduled_at = scheduled_at or datetime.utcnow().isoformat()
 
         if state:
             self.state = state
         else:
             self.state = ""
 
-        self.start_date = None
-        self.end_date = None
+        self.start_date = start_date
+        self.end_date = end_date
+
+        self.operation_id = operation_id
+
+    def to_row(self) -> dict:
+        return {
+            "id":           self.id,
+            "task_id":      self.task_id,
+            "dag_id":       self.dag_id,
+            "run_id":       self.run_id,
+            "scheduled_at": self.scheduled_at,
+            "start_date":   self.start_date,
+            "end_date":     self.end_date,
+            "state":        self.state,
+            "operation_id": self.operation_id,
+        }
 
     @staticmethod
     def filter_for_trs(trs):
@@ -111,18 +134,19 @@ class TaskRun:
         return " or ".join(filter_condition)
 
     def set_state(self, state: TaskRunState | None, yt_client: yt.YtClient) -> bool:
+        print("TASKRUN.set_state, cur: ", self.state, "new: ", state)
         # self.refresh_from_yt() # TODO
         if self.state == state:
             return False
 
-        current_time = datetime.utcnow()
+        current_time = datetime.utcnow().isoformat()
         self.state = state
         self.start_date = self.start_date or current_time
         if self.state in [TaskRunState.FAILED, TaskRunState.SUCCESS]:
             self.end_date = self.end_date or current_time
 
-        with yt_client.Transaction():
-            yt_client.insert_rows("//home/task_run", self)
+        # with yt_client.Transaction():
+        yt_client.insert_rows("//home/task_run", [self.to_row()])
 
         return True
 

@@ -22,6 +22,10 @@ class DAGNode:
         return list(self.preceding_task_ids)
 
     @property
+    def downstream_task_ids(self) -> list[str]:
+        return list(self.succeeding_task_ids)
+
+    @property
     def task_id(self) -> str:
         return self.id
 

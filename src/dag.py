@@ -28,7 +28,7 @@ class DAG:
 
     @classmethod
     def from_dag_entity(cls, de: DagEntity, yt_client: yt.YtClient):
-        print("from_dag_entity")
+        print("DAG.from_dag_entity")
         dag = cls.__new__(cls)
 
         dag.dag_id = de.dag_id
@@ -53,7 +53,7 @@ class DAG:
 
             operation = cfg.get("operation", "")
             operator_cls = operators.get(operation)
-            print(operator_cls)
+            print("CREATE OPERATOR: ", operator_cls)
             if not operator_cls:
                 continue
                 # raise ValueError(f"Unknown operator type: {operation}")
@@ -71,8 +71,9 @@ class DAG:
                 if producers := outlets_producers.get(inlet):
                     op.set_upstream(producers)
 
-        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.tasks}
-        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.tasks}
+        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.task_dict.items()}
+        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.task_dict.items()}
+        print(dag.upstream, dag.downstream)
         return dag
 
     @staticmethod
@@ -84,7 +85,7 @@ class DAG:
             start_date: datetime | None = None,
             creating_job_id: str | None = None,
     ) -> DagRun:
-        print("create_dagrun")
+        print("DAG.create_dagrun")
         run_id = f"{dag.dag_id}__scheduled__{start_date.isoformat()}" # TODO
         run = DagRun(
             dag=dag,

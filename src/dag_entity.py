@@ -58,18 +58,18 @@ class DagEntity(DagEntityRow):
                 ds.is_paused as is_paused,
                 ds.spec_path as spec_path,
                 ds.work_dir as work_dir
-                from [{"//home/dag_state"}] as ds
-                left join [{"//home/dag_run"}] as dr
-                    on ds.dag_id = dr.dag_id
-                where dr.dag_id is null 
-                    and ds.is_paused = false
+                FROM [{"//home/dag_state"}] AS ds
+                LEFT JOIN [{"//home/dag_run"}] AS dr
+                    ON ds.dag_id = dr.dag_id
+                WHERE dr.dag_id IS NULL 
+                    AND ds.is_paused = false
                 limit 20
-                """
+                """,
+                allow_join_without_index=True
             ))
         except Exception as e:
             print(e)
             raise
         print("rows: ", rows)
         dags_to_run = [cls(**row) for row in rows]
-        print(len(dags_to_run))
         return dags_to_run

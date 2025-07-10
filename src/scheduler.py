@@ -76,10 +76,10 @@ class Scheduler:
         while True:
             num_queued = self._do_scheduling()
 
-            self.job.executor.heartbeat() # обработка задач TODO
+            self.job.executor.heartbeat(self.yt_client) # обработка задач TODO
 
-            if not num_queued:
-                time.sleep(self._scheduler_idle_sleep_time)
+            # if not num_queued:
+            time.sleep(self._scheduler_idle_sleep_time)
 
     def _do_scheduling(self) -> int:
         print("_do_scheduling")
@@ -103,11 +103,12 @@ class Scheduler:
             try:
                 # dag = DAG.from_dag_entity(de, self.yt_client)
                 dag = self._get_dag(de)
-                dag.create_dagrun(
-                    yt_client=self.yt_client,
+                DAG.create_dagrun(
+                    dag=dag,
                     state=DagRunState.QUEUED,
-                    creating_job_id=self.job.id,
+                    yt_client=self.yt_client,
                     start_date=datetime.utcnow(),
+                    creating_job_id=self.job.id,
                 )
                 created += 1
             except Exception as e:
@@ -140,7 +141,7 @@ class Scheduler:
 
         print("dag_runs: ", dag_runs)
         for dag_run in dag_runs:
-            dag_run.set_state(DagRunState.RUNNING)
+            dag_run.set_state(DagRunState.RUNNING, self.yt_client)
             # dag_run.state = DagRunState.RUNNING
             # dag_run.start_date = datetime.utcnow().isoformat()
         print("end _start_queued_dagruns")
@@ -149,17 +150,21 @@ class Scheduler:
             self,
             dag_runs: list[DagRun],
     ) -> None:
+        print("_schedule_all_dag_runs")
         for dag_run in dag_runs:
-            dag_model = DagEntity.get(dag_run.dag_id, yt_client=self.yt_client) # TODO здесь можно взять уже созданный DAG
+            dag_model = self._get_dag(DagEntity.get(dag_run.dag_id, yt_client=self.yt_client)) # TODO здесь можно взять уже созданный DAG
 
             if not dag_model:
                 return
 
+            dag_run.dag = dag_model
             schedulable_trs = dag_run.update_state(yt_client=self.yt_client) #Пересчитывает статус DagRun,находит задачи, которые нужно поставить в SCHEDULED.
 
-            dag_run.schedule_trs(schedulable_trs, yt_client=self.yt_client)
+            cnt = dag_run.schedule_trs(schedulable_trs, yt_client=self.yt_client)
+            print("RETURN CNT: ", cnt)
 
     def _enqueue_task_runs(self): # _critical_section_enqueue_task_runs
+        print("_enqueue_task_runs")
         # max_trs = self.job.executor.parallelism - self.job.executor.slots_occupied
         # if max_trs <= 0:
         #     return 0
@@ -168,10 +173,10 @@ class Scheduler:
 
         self._enqueue_task_runs_with_queued_state(queued_trs, self.job.executor)
 
-        for task_run in queued_trs:
-            dag = DagEntity.get(task_run.dag_id, yt_client=self.yt_client)
-            operator = DAG.from_dag_entity(dag, self.yt_client).task_dict[task_run.task_id]
-            self.job.executor.queue_task_run(task_run, operator)
+        # for task_run in queued_trs:
+        #     dag = DagEntity.get(task_run.dag_id, yt_client=self.yt_client)
+        #     operator = DAG.from_dag_entity(dag, self.yt_client).task_dict[task_run.task_id]
+        #     self.job.executor.queue_task_run(task_run, operator)
 
 
         return len(queued_trs)
@@ -179,103 +184,131 @@ class Scheduler:
     def _executable_task_runs_to_queued(self, max_trs: int) -> list[TaskRun]:
         free_slots = max_trs # TODO self.job.executor.parallelism - self.job.executor.slots_occupied
 
-        rows = list(yt.select_rows(f"""
-        tr.id, tr.task_id, tr.dag_id, tr.run_id
-        FROM [`"//home/task_run"`] AS tr
-        WHERE tr.state = '{TaskRunState.READY}'
-        LIMIT {free_slots}
-        """))
-        if not rows:
-            return 0
+        try:
+            rows = list(self.yt_client.select_rows(
+            f"""
+                tr.id as id,
+                tr.task_id as task_id,
+                tr.dag_id as dag_id, 
+                tr.run_id as run_id,
+                tr.scheduled_at as scheduled_at,
+                tr.start_date as start_date,
+                tr.end_date as end_date,
+                tr.state as state,
+                tr.operation_id as operation_id
+                FROM [{"//home/task_run"}] AS tr
+                WHERE tr.state = '{TaskRunState.READY}'
+                LIMIT 1
+            """))
 
-        executable_trs = [TaskRun(**r) for r in rows]
+            print("ROWS ", rows)
+            if not rows:
+                return 0
 
-        for tr in executable_trs:
-            tr.set_state(TaskRunState.QUEUED, self.yt_client)
+            executable_trs = [TaskRun(**r) for r in rows]
 
-        # starved_tasks: set[tuple[str, str]] = set()
-        #
-        # while True:
-        #     num_starved_tasks = len(starved_tasks)
-        #
-        #     query = f"""
-        #         select tr.*
-        #         from [{'//home/task_run'}] as tr
-        #         join {'//home/dag_run'} as dr
-        #             on tr.run_id = dr.run_id
-        #             and dr.state = {DagRunState.RUNNING}
-        #         join {'//home/dag_model'} as dm
-        #             on tr.dag_id = dm.dag_id
-        #             and dm.is_paused = false
-        #         where tr.state = {TaskRunState.READY}
-        #         """
-        #
-        #     if starved_tasks:
-        #         pairs = ",\n    ".join(
-        #             f"('{dag_id}', '{task_id}')"
-        #             for dag_id, task_id in starved_tasks
-        #         )
-        #         query += f"and (tr.dag_id, tr.task_id) NOT IN (\n{pairs}\n)\n"
-        #
-        #     query += f"limit {max_trs}"
-        #
-        #     if self.yt_client.exists("//home/task_run") and self.yt_client.exists("//home/dag_run") and self.yt_client.exists("//home/dag_model"):
-        #         rows = list(self.yt_client.select_rows(query))
-        #     else:
-        #         rows = []
-        #     task_runs_to_examine = [TaskRun(**row) for row in rows]
-        #
-        #
-        #     if not task_runs_to_examine:
-        #         break
-        #
-        #
-        #     executor_slots_available = self.job.executor.slots_available
-        #     for tr in task_runs_to_examine:
-        #         if executor_slots_available <= 0:
-        #             starved_tasks.add((tr.dag_id, tr.task_id))
-        #             continue
-        #         executor_slots_available -= 1
-        #
-        #         executable_trs.append(tr)
-        #
-        #     is_done = executable_trs or len(task_runs_to_examine) < max_trs
-        #     found_new_filters = (len(starved_tasks) > num_starved_tasks)
-        #
-        #     if is_done or not found_new_filters:
-        #         break
-        #
-        # if executable_trs:
-        #     filter_for_trs = TaskRun.filter_for_trs(executable_trs)
-        #
-        #     now_iso = datetime.utcnow().isoformat()
-        #     updated_rows = []
-        #
-        #     with yt.Transaction() as tx:
-        #         rows = list(tx.select_rows(
-        #             f"""
-        #             select tr.*
-        #             from `{"//home/task_run"}` as tr
-        #             where {filter_for_trs}
-        #             """
-        #         ))
-        #
-        #         for row in rows:
-        #             row["state"] = TaskRunState.QUEUED
-        #             row["queued_at"] = now_iso
-        #             row["queued_by_job_id"] = self.job.id
-        #             updated_rows.append(row)
-        #
-        #         if updated_rows:
-        #             tx.insert_rows("//home/task_run", updated_rows, update=True)
-        return executable_trs
+            print("OK")
+            print(executable_trs)
+            try:
+                for tr in executable_trs:
+                    tr.set_state(TaskRunState.QUEUED, self.yt_client)
+            except Exception as e:
+                print("HERE", e)
+                raise
+
+            # starved_tasks: set[tuple[str, str]] = set()
+            #
+            # while True:
+            #     num_starved_tasks = len(starved_tasks)
+            #
+            #     query = f"""
+            #         select tr.*
+            #         from [{'//home/task_run'}] as tr
+            #         join {'//home/dag_run'} as dr
+            #             on tr.run_id = dr.run_id
+            #             and dr.state = {DagRunState.RUNNING}
+            #         join {'//home/dag_model'} as dm
+            #             on tr.dag_id = dm.dag_id
+            #             and dm.is_paused = false
+            #         where tr.state = {TaskRunState.READY}
+            #         """
+            #
+            #     if starved_tasks:
+            #         pairs = ",\n    ".join(
+            #             f"('{dag_id}', '{task_id}')"
+            #             for dag_id, task_id in starved_tasks
+            #         )
+            #         query += f"and (tr.dag_id, tr.task_id) NOT IN (\n{pairs}\n)\n"
+            #
+            #     query += f"limit {max_trs}"
+            #
+            #     if self.yt_client.exists("//home/task_run") and self.yt_client.exists("//home/dag_run") and self.yt_client.exists("//home/dag_model"):
+            #         rows = list(self.yt_client.select_rows(query))
+            #     else:
+            #         rows = []
+            #     task_runs_to_examine = [TaskRun(**row) for row in rows]
+            #
+            #
+            #     if not task_runs_to_examine:
+            #         break
+            #
+            #
+            #     executor_slots_available = self.job.executor.slots_available
+            #     for tr in task_runs_to_examine:
+            #         if executor_slots_available <= 0:
+            #             starved_tasks.add((tr.dag_id, tr.task_id))
+            #             continue
+            #         executor_slots_available -= 1
+            #
+            #         executable_trs.append(tr)
+            #
+            #     is_done = executable_trs or len(task_runs_to_examine) < max_trs
+            #     found_new_filters = (len(starved_tasks) > num_starved_tasks)
+            #
+            #     if is_done or not found_new_filters:
+            #         break
+            #
+            # if executable_trs:
+            #     filter_for_trs = TaskRun.filter_for_trs(executable_trs)
+            #
+            #     now_iso = datetime.utcnow().isoformat()
+            #     updated_rows = []
+            #
+            #     with yt.Transaction() as tx:
+            #         rows = list(tx.select_rows(
+            #             f"""
+            #             select tr.*
+            #             from `{"//home/task_run"}` as tr
+            #             where {filter_for_trs}
+            #             """
+            #         ))
+            #
+            #         for row in rows:
+            #             row["state"] = TaskRunState.QUEUED
+            #             row["queued_at"] = now_iso
+            #             row["queued_by_job_id"] = self.job.id
+            #             updated_rows.append(row)
+            #
+            #         if updated_rows:
+            #             tx.insert_rows("//home/task_run", updated_rows, update=True)
+            print("OK2")
+            return executable_trs
+        except Exception as e:
+            print(e)
+            raise
 
     def _enqueue_task_runs_with_queued_state(
             self, task_runs: list[TaskRun], executor: Executor
     ) -> None:
-        for tr in task_runs:
-            # if tr.dag_run.state in [DagRunState.FAILED, DagRunState.FAILED]:
-            #     tr.set_state(None, yt_client=self.yt_client)
-            #     continue
-
-            executor.queue_task_run(tr, tr.task, self.yt_client)
+        print("_enqueue_task_runs_with_queued_state")
+        print("task_runs: ", task_runs)
+        try:
+            for tr in task_runs:
+                # if tr.dag_run.state in [DagRunState.FAILED, DagRunState.FAILED]:
+                #     tr.set_state(None, yt_client=self.yt_client)
+                #     continue
+                dag = self._get_dag(DagEntity.get(tr.dag_id, yt_client=self.yt_client)) # TODO
+                executor.queue_task_run(tr, dag.task_dict[tr.task_id], self.yt_client)
+        except Exception as e:
+            print(e)
+            raise

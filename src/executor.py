@@ -19,7 +19,7 @@ class Executor:
         self.job_id = job_id
         self.parallelism = parallelism
 
-        self._running_ops: dict[str, str] = {} #TaskRun.id -> operation_id
+        self._running_ops: dict = {} #TaskRun.id -> operation_id
         self._pending: list[TaskRun] = []
 
     def start(self) -> None:
@@ -38,45 +38,65 @@ class Executor:
             operator: BaseOperator,
             yt_client: yt.YtClient,
     ):
+        print("EXECUTOR.queue_task_run")
         if self.slots_occupied >= self.parallelism:
             return
 
-        task_run.operation_id = operator.run_operation(self.yt_client)
+        task_run.operation_id = operator.run_operation(yt_client).id
 
-        update = {
-            "id": task_run.id,
-            "state": TaskRunState.RUNNING,
-            "queued_at": datetime.now().utcnow().isoformat(),
-            "queued_by_job_id": self.job_id,
-            "operation_id": task_run.operation_id,
-        }
-        self.yt_client.insert_rows("//home/task_run", [update], update=True)
+        print("back in EXECUTOR.queue_task_run")
+
+        update = task_run.to_row()
+        update["state"] = TaskRunState.RUNNING
+        update["operation_id"] = task_run.operation_id
+
+        # {
+        #     "id": task_run.id,
+        #     "state": TaskRunState.RUNNING,
+        #     "queued_at": datetime.now().utcnow().isoformat(),
+        #     "queued_by_job_id": self.job_id,
+        #     "operation_id": task_run.operation_id,
+        # }
+        yt_client.insert_rows("//home/task_run", [update])
 
         self._running_ops[task_run.id] = task_run.operation_id
         self._pending.append(task_run)
 
-    def heartbeat(self) -> None:
+    def heartbeat(self, yt_client: yt.YtClient) -> None:
         print("Heartbeat")
         finished = []
-        for task_run in self._pending:
-            operation_id = task_run.operation_id
-            status = self.yt_client.get_operation_state(operation_id)
+        try:
+            for task_run in self._pending:
+                print(task_run.operation_id)
+                try:
+                    operation_id = task_run.operation_id
+                    status = yt_client.get_operation_state(operation_id)
+                except Exception as e:
+                    print("HERE", e)
+                    raise
 
-            if status.is_running:
-                continue
+                print(operation_id, "STATUS: ", status)
 
-            new_state = TaskRunState.SUCCESS if status.is_success else TaskRunState.FAILED
-            update = {
-                "id": task_run.id,
-                "state": new_state,
-                "started_at": task_run.start_date or datetime.now().utcnow().isoformat(),
-                "ended_at": datetime.now().utcnow().isoformat(),
-            }
-            self.yt_client.insert_rows("//home/task_run", [update], update=True)
+                if status.is_running():
+                    continue
 
-            finished.append(task_run)
-            self._pending.remove(task_run)
-            del self._running_ops[task_run.id]
+                new_state = TaskRunState.FAILED if status.is_unsuccessfully_finished() else TaskRunState.SUCCESS
+
+                task_run.set_state(new_state, yt_client)
+                # update = {
+                #     "id": task_run.id,
+                #     "state": new_state,
+                #     "started_at": task_run.start_date or datetime.now().utcnow().isoformat(),
+                #     "ended_at": datetime.now().utcnow().isoformat(),
+                # }
+                # yt_client.insert_rows("//home/task_run", [update], update=True)
+
+                finished.append(task_run)
+                self._pending.remove(task_run)
+                del self._running_ops[task_run.id]
+        except Exception as e:
+            print(e)
+            raise
 
 # class Executor1:
 #     job_id: None | int | str = None
