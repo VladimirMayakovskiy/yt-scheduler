@@ -80,8 +80,8 @@ class SortOperator(BaseOperator):
 
 
     def run_operation(self, yt_client: yt.YtClient) -> str:
-        yt_client.create("file", self.spec_path, force=True)
-        yt_client.write_file(self.spec_path, json.dumps(self.spec))
+        # yt_client.create("file", self.spec_path, force=True)
+        # yt_client.write_file(self.spec_path, json.dumps(self.spec))
 
         # mapper = self.spec["mapper"]
         # input_tables = self.spec.get("input_table_paths", [])

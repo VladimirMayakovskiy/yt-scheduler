@@ -7,10 +7,11 @@ from typing import Any
 import yaml
 
 from dag_entity import DagEntity
-from dag_run import DagRun
+from dag_run import DagRun, DagRunRow
 from dag_node import DAGNode
 from ytoperator import BaseOperator, operators
 from state import DagRunState
+import uuid
 
 import yt.wrapper as yt
 
@@ -19,7 +20,6 @@ class DAG:
 
     default_args: dict[str, Any]
 
-    # spec: dict
     work_dir: str
 
     task_dict: dict[str, DAGNode] # task_dict: dict[str, Operator]
@@ -35,8 +35,7 @@ class DAG:
         dag.work_dir = de.work_dir
         dag.task_dict: dict[str, DAGNode] = {}
 
-        raw = yt_client.read_file(de.spec_path)
-        spec = yaml.safe_load(raw)
+        spec = yaml.safe_load(yt_client.read_file(de.spec_path))
 
         outlets_producers: dict[str, list[BaseOperator]] = {} # TODO
         for task_id, params in spec.get("steps", {}).items():
@@ -58,7 +57,7 @@ class DAG:
                 continue
                 # raise ValueError(f"Unknown operator type: {operation}")
 
-            operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg)
+            operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg) # TODO
             dag.task_dict[task_id] = operator
             print("OK from_dag_entity")
 
@@ -79,24 +78,25 @@ class DAG:
     @staticmethod
     def create_dagrun(
             *,
+            yt_client: yt.YtClient,
             dag: DAG,
             state: DagRunState,
-            yt_client: yt.YtClient,
             start_date: datetime | None = None,
             creating_job_id: str | None = None,
     ) -> DagRun:
         print("DAG.create_dagrun")
-        run_id = f"{dag.dag_id}__scheduled__{start_date.isoformat()}" # TODO
-        run = DagRun(
-            dag=dag,
-            dag_id=dag.dag_id,
-            run_id=run_id,
-            start_date=start_date,
-            state=state,
-            creating_job_id=creating_job_id,
-        )
-        run.dag_run_prepare_for_execution(yt_client) #TODO а мб после этой строчки стейт должен меняться на queued
-        # run.verify_integrity(yt_client=yt_client)
+        # row = DagRunRow(dag_id=dag.dag_id, start_date=start_date, state=state) # TODO
+        run = DagRun(dag_id=dag.dag_id, state=state, dag=dag, start_date=start_date, creating_job_id=creating_job_id)
+        # run_id = uuid.uuid4().hex # TODO
+        # run = DagRun(
+        #     dag=dag,
+        #     dag_id=dag.dag_id,
+        #     run_id=run_id,
+        #     start_date=start_date,
+        #     state=state,
+        #     creating_job_id=creating_job_id,
+        # )
+        run.dag_run_prepare_for_execution(yt_client)
         return run
 
     @property

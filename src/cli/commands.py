@@ -1,21 +1,39 @@
 import os
 from dataclasses import asdict
-from uuid import uuid4
 
 from scheduler import Job, Scheduler, run_job
 from dag_entity import DagEntityRow
 import yt.wrapper as yt
-from yt.wrapper.schema import TableSchema
+from yt_table_client import YtDynTableClient
+from yt.wrapper.schema import TableSchema, SortColumn
+
+
+def _ensure_table(yt_client: yt.YtClient, row_type: type):
+    if not yt_client.exists(row_type.table_path):
+        schema = TableSchema.from_row_type(row_type, unique_keys=row_type.unique_keys)
+        for key in row_type.key_columns:
+            schema = schema.build_schema_sorted_by(SortColumn(key, SortColumn.ASCENDING))
+        yt_client.create("table", row_type.table_path, attributes={
+            "schema": schema ,
+            "dynamic": True
+        })
+        yt_client.mount_table(row_type.table_path, sync=True)
 
 def scheduler(args):
     yt_client = yt.YtClient(proxy=args.yt_proxy)
+
+    _ensure_table(yt_client, DagEntityRow)
+    from dag_run import DagRun
+    _ensure_table(yt_client, DagRun)
+    from task_run import TaskRun
+    _ensure_table(yt_client, TaskRun)
 
     scheduler = Scheduler(job = Job(), yt_client=yt_client)
     run_job(job=scheduler.job, execute_callable=scheduler._execute, yt_client=yt_client)
 
 def add_dag(args):
     yt_client = yt.YtClient(proxy=args.yt_proxy)
-    # загружаем spec в ytsaurus
+
     spec_path = args.spec
     work_dir = args.work_dir
 
@@ -28,20 +46,8 @@ def add_dag(args):
     cypress_spec_path = f"{work_dir}/spec.yaml"
     yt_client.write_file(cypress_spec_path, spec)
 
-    dag_id = f"dag_{uuid4().hex[:8]}" # args.dag_id or TODO
-    row = DagEntityRow(dag_id=dag_id, is_paused=False, spec_path=cypress_spec_path, work_dir=work_dir)
+    row = DagEntityRow(spec_path=cypress_spec_path, work_dir=work_dir)
+    _ensure_table(yt_client, DagEntityRow)
+    yt_client.insert_rows(DagEntityRow.table_path, [asdict(row)])
 
-    if not yt_client.exists("//home/dag_state"):
-        yt_client.create("table", "//home/dag_state", attributes={"schema": TableSchema.from_row_type(DagEntityRow) , "dynamic": True})
-        yt_client.mount_table("//home/dag_state", sync=True)
-
-    yt_client.insert_rows("//home/dag_state", [asdict(row)])
-    # yt_client.write_table_structured(
-    #     "//home/dag_state",
-    #     DagEntityRow,
-    #     [
-    #         row,
-    #     ],
-    # )
-
-    print(f"Dag registered: dag_id={dag_id}, work_dir={work_dir}")
+    print(f"Dag registered: dag_id={DagEntityRow.dag_id}, work_dir={work_dir}")

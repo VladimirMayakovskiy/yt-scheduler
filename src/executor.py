@@ -11,7 +11,7 @@ import yt.wrapper as yt
 
 from ytoperator import BaseOperator
 from state import TaskRunState
-from task_run import TaskRun, TaskRunKey
+from task_run import TaskRun
 
 
 class Executor:
@@ -24,9 +24,11 @@ class Executor:
 
     def start(self) -> None:
         print("Start Executor")
+        #TODO
 
     def end(self) -> None:
         print("Shutting down Executor")
+        #TODO
 
     @property
     def slots_occupied(self):
@@ -42,28 +44,29 @@ class Executor:
         if self.slots_occupied >= self.parallelism:
             return
 
-        task_run.operation_id = operator.run_operation(yt_client).id
+        operation_id = operator.run_operation(yt_client).id
 
         print("back in EXECUTOR.queue_task_run")
 
-        update = task_run.to_row()
-        update["state"] = TaskRunState.RUNNING
-        update["operation_id"] = task_run.operation_id
+        TaskRun.update_rows(yt_client, task_run, state=TaskRunState.RUNNING, operation_id=operation_id)
+        # update = task_run.to_row()
+        # update["state"] = TaskRunState.RUNNING
+        # update["operation_id"] = task_run.operation_id
+        #
+        # # {
+        # #     "id": task_run.id,
+        # #     "state": TaskRunState.RUNNING,
+        # #     "queued_at": datetime.now().utcnow().isoformat(),
+        # #     "queued_by_job_id": self.job_id,
+        # #     "operation_id": task_run.operation_id,
+        # # }
+        # yt_client.insert_rows("//home/task_run", [update])
 
-        # {
-        #     "id": task_run.id,
-        #     "state": TaskRunState.RUNNING,
-        #     "queued_at": datetime.now().utcnow().isoformat(),
-        #     "queued_by_job_id": self.job_id,
-        #     "operation_id": task_run.operation_id,
-        # }
-        yt_client.insert_rows("//home/task_run", [update])
-
-        self._running_ops[task_run.id] = task_run.operation_id
+        self._running_ops[task_run.id] = operation_id
         self._pending.append(task_run)
 
     def heartbeat(self, yt_client: yt.YtClient) -> None:
-        print("Heartbeat")
+        print("Executor.Heartbeat")
         finished = []
         try:
             for task_run in self._pending:
@@ -82,14 +85,7 @@ class Executor:
 
                 new_state = TaskRunState.FAILED if status.is_unsuccessfully_finished() else TaskRunState.SUCCESS
 
-                task_run.set_state(new_state, yt_client)
-                # update = {
-                #     "id": task_run.id,
-                #     "state": new_state,
-                #     "started_at": task_run.start_date or datetime.now().utcnow().isoformat(),
-                #     "ended_at": datetime.now().utcnow().isoformat(),
-                # }
-                # yt_client.insert_rows("//home/task_run", [update], update=True)
+                TaskRun.update_rows(yt_client, task_run, state=new_state)
 
                 finished.append(task_run)
                 self._pending.remove(task_run)

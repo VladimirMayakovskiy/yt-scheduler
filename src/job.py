@@ -20,7 +20,7 @@ class Job: #TODO возможно стоит переименовать в Sched
     state: str#JobState
 
     def __init__(self):
-        self.id = str(uuid.uuid4())
+        self.id = uuid.uuid4().hex
         self.start_date = None
         self.end_date = None
         self.state = None
