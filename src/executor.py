@@ -74,8 +74,8 @@ class Executor(LoggingMixin):
                 self.log.exception(f"Can not get operation state taskrun={task_run.task_id},{task_run.run_id}:")
                 raise
 
-            self.log.info(f"Taskrun={task_run.task_id},{task_run.run_id} operation_id={operation_id}, STATUS={status}")
-            if status.is_running():
+            self.log.info(f"Taskrun={task_run.task_id},{task_run.run_id} operation_id={operation_id}, STATUS={status}, is_running={status.is_running}")
+            if not status.is_finished():
                 continue
 
             new_state = TaskRunState.FAILED if status.is_unsuccessfully_finished() else TaskRunState.SUCCESS
