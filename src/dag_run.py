@@ -16,6 +16,8 @@ import yt.wrapper as yt
 from yt.wrapper.schema import TableSchema
 from typing import ClassVar
 
+from logging_mixin import LoggingMixin
+
 def get_all_table_fields(cls: type, alias: str) -> str:
     return ",\n".join(
         f"{alias}.{f.name} AS {f.name}"
@@ -38,7 +40,7 @@ class DagRunRow:
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 # @yt.yt_dataclass
-class DagRun(DagRunRow):
+class DagRun(DagRunRow, LoggingMixin):
     # table_path:  ClassVar[str] = "//tmp/dag_run"
     # key_columns: ClassVar[list[str]] = ["run_id"]
     # unique_keys: ClassVar[bool] = True
@@ -79,17 +81,19 @@ class DagRun(DagRunRow):
 
 
     def dag_run_prepare_for_execution(self, yt_client: yt.YtClient):
-        print("DAGRUN.dag_run_prepare_for_execution")
         # if not yt_client.exists("//home/dag_run"): todo
-        yt_client.insert_rows(DagRun.table_path, [asdict(self)])
-        self.create_task_runs_for_dag_run(yt_client)
+        try:
+            yt_client.insert_rows(DagRun.table_path, [asdict(self)])
+            self.create_task_runs_for_dag_run(yt_client)
+        except Exception as e:
+            self.log.exception("Failed write dagrun SKIPPING:")
+            return
 
 
     @classmethod
     def get_running_dag_runs_to_examine(cls, yt_client: yt.YtClient) -> list["DagRun"]:
-        print("DAGRUN.get_running_dag_runs_to_examine")
-        try:
-            if yt_client.exists(DagRun.table_path): # and yt_client.exists("//home/dag_state"):
+        if yt_client.exists(DagRun.table_path):
+            try:
                 rows = list(yt_client.select_rows(
                     f"""
                     {get_all_table_fields(DagRunRow, "dr")} 
@@ -97,17 +101,16 @@ class DagRun(DagRunRow):
                     WHERE dr.state = "{DagRunState.RUNNING}"
                     """
                 ))
-            else:
-                rows = []
-            print("DAGRUNS TO EXAMINE: ", rows)
-            return [cls(DagRunRow(**row)) for row in rows]
-        except Exception as e:
-            print(e)
-            return []
+            except Exception as e:
+                cls.logger.exception("Failed to select rows:")
+                raise
+        else:
+            rows = []
+        cls.logger.info(f"selected rows: {rows}")
+        return [cls(DagRunRow(**row)) for row in rows]
 
     @classmethod
     def get_queued_dag_runs_to_set_running(cls, yt_client: yt.YtClient) -> list["DagRun"]:
-        print("DAGRUN.get_queued_dag_runs_to_set_running")
         if yt_client.exists(DagRun.table_path):
             try:
                 rows = list(yt_client.select_rows(
@@ -118,26 +121,17 @@ class DagRun(DagRunRow):
                     """
                 ))
             except Exception as e:
-                print(e)
+                cls.logger.exception("Failed to select rows:")
                 raise
         else:
             rows = []
-        print("DAGRUNS TO SET RUNNING: ", rows)
-        try:
-            return [cls(DagRunRow(**row)) for row in rows]
-        except Exception as e:
-            print("HERE", e)
-            return []
+        cls.logger.info(f"selected rows: {rows}")
+        return [cls(DagRunRow(**row)) for row in rows]
 
     def update_state(
             self, yt_client: yt.YtClient
     ) -> list[TaskRun]:
-        print("DAGRUN.update_state")
-        # dag = self.dag
         trs, schedulable_trs, unfinished, finished = self.task_run_scheduling_decisions(yt_client)
-
-        print("back in DAGRUN.update_state")
-
         try:
             trs_for_dagrun_state = trs # TODO self._trs_for_dagrun_state(dag=dag, trs=trs) # берем только листья таски чтоб судить про failed/running dags
 
@@ -146,27 +140,20 @@ class DagRun(DagRunRow):
             elif not unfinished and all(x.state in [TaskRunState.SUCCESS] for x in trs_for_dagrun_state):
                 self.set_state(DagRunState.SUCCESS, yt_client)
             else:
-                print("here")
                 self.set_state(DagRunState.RUNNING, yt_client)
-
             return schedulable_trs
         except Exception as e:
-            print(e)
-            raise
+            self.log.warning(f"Can not update states -> SKIPPING dagrun={self.run_id}")
+            return []
 
     def task_run_scheduling_decisions(self, yt_client: yt.YtClient):
-        print("DAGRUN.task_run_scheduling_decisions")
-        try:
-            trs = self.get_task_runs(yt_client)
-            print("trs", trs)
+        trs = self.get_task_runs(yt_client)
+        self.log.info(f"Get all existing taskruns for dagrun={self.run_id} : {trs}")
 
-            unfinished_trs = [t for t in trs if t.state in
-                              [TaskRunState.RUNNING, TaskRunState.QUEUED, TaskRunState.READY, TaskRunState.SCHEDULED]]
-            schedulable_trs = [t for t in trs if t.state == TaskRunState.SCHEDULED]
-            finished_trs = [t for t in trs if t.state in [TaskRunState.FAILED, TaskRunState.SUCCESS]]
-        except Exception as e:
-            print(e)
-            raise
+        unfinished_trs = [t for t in trs if t.state in
+                          [TaskRunState.RUNNING, TaskRunState.QUEUED, TaskRunState.READY, TaskRunState.SCHEDULED]]
+        schedulable_trs = [t for t in trs if t.state == TaskRunState.SCHEDULED]
+        finished_trs = [t for t in trs if t.state in [TaskRunState.FAILED, TaskRunState.SUCCESS]]
 
         if schedulable_trs:
             schedulable_trs  =  self._get_ready_trs(
@@ -176,19 +163,18 @@ class DagRun(DagRunRow):
         else:
             schedulable_trs = []
 
-        print("schedulable_trs: ", schedulable_trs)
-        print("unfinished_trs: ", unfinished_trs)
-        print("finished_trs: ", finished_trs)
+        self.log.info(f"schedulable_trs for dagrun={self.run_id}: {schedulable_trs}")
+        self.log.info(f"unfinished_trs for dagrun={self.run_id}: {unfinished_trs}")
+        self.log.info(f"finished_trs for dagrun={self.run_id}: {finished_trs}")
         return [trs, schedulable_trs, unfinished_trs, finished_trs]
 
     def get_task_runs(self, yt_client: yt.YtClient):
-        print("DAGRUN.get_task_runs")
         try:
             return DagRun.fetch_task_runs(
                 run_id=self.run_id, dag_id=self.dag_id, task_ids=self.dag.task_ids, yt_client=yt_client
             )
         except Exception as e:
-            print(e)
+            self.log.exception("Failed fetch taskruns:")
             raise
 
     def _get_ready_trs(
@@ -196,14 +182,8 @@ class DagRun(DagRunRow):
             schedulable_trs: list[TaskRun],
             finished_trs: list[TaskRun]
     ):
-        print("DAGRUN._get_ready_trs")
         # отбирает из переданного списка те таскраны, у которых все зависимости выполнены
         ready_trs: list[TaskRun] = []
-
-        if not schedulable_trs:
-            return ready_trs
-
-
         finished_trs_ids = {ti.task_id for ti in finished_trs}
 
         for ti in schedulable_trs:
@@ -211,7 +191,6 @@ class DagRun(DagRunRow):
 
             if upstream.issubset(finished_trs_ids):
                 ready_trs.append(ti)
-
         return ready_trs
 
     @staticmethod
@@ -219,38 +198,16 @@ class DagRun(DagRunRow):
             schedulable_trs: list[TaskRun],
             yt_client: yt.YtClient,
     ) -> int:
-        print("DAGRUN.schedule_trs")
-        updated = []
         try:
             if schedulable_trs:
-                print(schedulable_trs)
-                # now_iso = datetime.utcnow().isoformat()
-                # for tr in schedulable_trs: # TODO написать метод set_state
-                #
-                #     updated.append({
-                #         "id": tr.id,
-                #         "task_id": tr.task_id,
-                #         "dag_id": tr.dag_id,
-                #         "run_id": tr.run_id,
-                #         "operation_id": tr.operation_id,
-                #         "state": TaskRunState.READY,
-                #         "scheduled_at": now_iso,
-                #     })
-                #
-                # if updated:
-                #     yt_client.insert_rows(
-                #         TaskRun.table_path,
-                #         updated,
-                #     )
-                return TaskRun.update_rows(yt_client, schedulable_trs, state=TaskRunState.READY)
-
+                return len(TaskRun.update_rows(yt_client, schedulable_trs, state=TaskRunState.READY))
             return 0
         except Exception as e:
-            print(e)
-            raise
+            DagRun.logger.exception("Failed to update rows SKIPPING:")
+            return 0
 
     def set_state(self, state: DagRunState, yt_client: yt.YtClient) -> None: # todo
-        print("DAGRUN.set_state, current: ", self.state, "new: ", state)
+        self.log.info(f"UPDATE state FROM {self.state} TO {state} run_id={self.run_id}")
         if self.state != state:
             if state == DagRunState.QUEUED:
                 self.queued_at = datetime.utcnow()
@@ -269,12 +226,11 @@ class DagRun(DagRunRow):
         else:
             if state == DagRunState.QUEUED: # TODO updated
                 self.queued_at = datetime.utcnow().isoformat()
-
         try:
             yt_client.insert_rows(DagRun.table_path, [asdict(self)])
         except Exception as e:
-            print(e)
-            pass
+            self.log.exception("Failed insert rows:")
+            raise
 
     @staticmethod
     def fetch_task_runs(
@@ -283,7 +239,6 @@ class DagRun(DagRunRow):
             dag_id: str | None = None,
             task_ids: list[str] | None = None
     )  -> list[TaskRun] : # TODO
-        print("DAGRUN.fetch_task_runs")
         if not yt_client.exists(TaskRun.table_path):
             return []
 
@@ -299,7 +254,6 @@ class DagRun(DagRunRow):
         where_clause = ""
         if conditions:
             where_clause = "where " + " and ".join(conditions)
-        print(where_clause)
         try:
             rows = list(yt_client.select_rows(
                 f"""
@@ -308,22 +262,19 @@ class DagRun(DagRunRow):
                 {where_clause}
                 """
             ))
-            print("TASKRUNS: ", rows)
             return [TaskRun(TaskRunRow(**row)) for row in rows]
         except Exception as e:
-            print(e)
-            return []
+            raise
 
 
     def create_task_runs_for_dag_run(self, yt_client: yt.YtClient) -> None: #verify_integrity
         # инициализируем taskrun
-        print("DAGRUN.create_task_runs_for_dag_run")
         try:
             existing_task_ids = {t.task_id for t in self.get_task_runs(yt_client)}
-            print(existing_task_ids)
+            self.log.info(f"existing taskruns for dagrun={self.run_id}: {existing_task_ids}")
 
             tasks_to_create = [task for task in self.dag.tasks if task.task_id not in existing_task_ids]
-            print("TASK TO CREATE ", {t.task_id for t in tasks_to_create})
+            self.log.info(f"TASKRUNS TO CREATE for dagrun={self.run_id}: {[t.task_id for t in tasks_to_create]}")
 
             # TODO mb мы не должны сразу создавать все таскраны
             roots_trs_instant_ready = [
@@ -347,11 +298,11 @@ class DagRun(DagRunRow):
                 if task not in self.dag.roots
             ]
 
-            print("ROOTS:", roots_trs_instant_ready)
-            print("OTHER: ", trs_to_create)
+            self.log.info(f"roots: {roots_trs_instant_ready}")
+            self.log.info(f"other: {trs_to_create}")
             DagRun._create_task_runs(tasks=trs_to_create + roots_trs_instant_ready, yt_client=yt_client)
         except Exception as e:
-            print(e)
+            self.log.exception(f"Failed to start schedule DagRun {self.run_id}")
             raise
 
 
@@ -360,13 +311,8 @@ class DagRun(DagRunRow):
             tasks: list[TaskRunRow],
             yt_client: yt.YtClient,
     ) -> None:
-        print("DAGRUN._create_task_runs")
         try:
-            print(len(tasks), asdict(tasks[0]))
-            # if not yt_client.exists("//home/task_run"): todo
-            print([asdict(task) for task in tasks])
             yt_client.insert_rows(TaskRunRow.table_path, [asdict(task) for task in tasks])
-            print("HERE")
         except Exception as e:
-            print(e)
+            DagRun.logger.exception("Failed to insert rows:")
             raise

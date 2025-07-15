@@ -10,7 +10,8 @@ import yt.wrapper as yt
 from yt.wrapper.schema import TableSchema
 
 from dag_run import DagRun
-
+from logging_mixin import LoggingMixin
+from dag_run import get_all_table_fields
 
 @yt.yt_dataclass
 class DagEntityRow:
@@ -25,45 +26,42 @@ class DagEntityRow:
     is_paused: bool = False
 
 
-class DagEntity(DagEntityRow):
+class DagEntity(DagEntityRow, LoggingMixin):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
     @classmethod
     def get(cls, dag_id: str, yt_client: yt.YtClient) -> "DagEntity" | None:
-        print("DagEntity.get")
-        if yt_client.exists(DagEntityRow.table_path):
+        if not yt_client.exists(DagEntityRow.table_path):
+            cls.logger.warning(f"{DagEntityRow.table_path} does not exist")
+            return None
+        try:
             rows = list(yt_client.select_rows(
                 f"""
-                ds.dag_id as dag_id,
-                ds.is_paused as is_paused,
-                ds.spec_path as spec_path,
-                ds.work_dir as work_dir
+                {get_all_table_fields(DagEntityRow, alias="ds")}
                 from [{DagEntityRow.table_path}] as ds
                 where ds.dag_id = "{dag_id}"
                 limit 1
                 """
             ))
-        else:
-            rows = []
+        except Exception as e:
+            cls.logger.exception("Failed to select rows:")
+            raise
         if not rows:
+            cls.logger.info(f"Can not find DagEntity with dag_id={dag_id}")
             return None
-        print(rows)
+        cls.logger.info(f"Get rows: {rows}")
         return cls(**rows[0])
 
     @classmethod
     def dags_needing_dagruns(cls, yt_client: yt.YtClient) -> list["DagEntity"]:
-        print("DagEntity.dags_needing_dagruns")
-
         if not yt_client.exists(DagEntityRow.table_path):
+            cls.logger.warning(f"{DagEntityRow.table_path} does not exist")
             return []
 
         def _query(cond):
             return f"""
-                ds.dag_id as dag_id,
-                ds.is_paused as is_paused,
-                ds.spec_path as spec_path,
-                ds.work_dir as work_dir
+                {get_all_table_fields(DagEntityRow, alias="ds")}
                 FROM [{DagEntityRow.table_path}] AS ds
                 {cond} 
                 limit 20
@@ -78,8 +76,8 @@ class DagEntity(DagEntityRow):
                 allow_join_without_index=True
             ))
         except Exception as e:
-            print(e)
+            cls.logger.exception("Failed to select rows:")
             raise
-        print("rows: ", rows)
+        cls.logger.info(f"selected rows: {rows}")
         dags_to_run = [cls(**row) for row in rows]
         return dags_to_run

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from ytoperator import BaseOperator
 from state import TaskRunState
+from logging_mixin import LoggingMixin
 
 import yt.wrapper as yt
 @yt.yt_dataclass
@@ -37,7 +38,7 @@ class TaskRunRow:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 # @yt.yt_dataclass
-class TaskRun(TaskRunRow):
+class TaskRun(TaskRunRow, LoggingMixin):
     # table_path:  ClassVar[str] = "//tmp/task_run"
     # key_columns: ClassVar[list[str]] = ["id"]
     # unique_keys: ClassVar[bool] = True
@@ -113,7 +114,6 @@ class TaskRun(TaskRunRow):
         # self.operation_id = operation_id
     @classmethod
     def get_executable_task_runs_to_queued(cls, yt_client: yt.YtClient) -> list["TaskRun"]:
-        print("TaskRun.get_executable_task_runs_to_queued")
         from dag_run import get_all_table_fields
         try:
             if yt_client.exists(TaskRun.table_path):
@@ -127,12 +127,11 @@ class TaskRun(TaskRunRow):
                 ))
             else:
                 rows = []
-            print("ROWS TO QUEUE: ", rows)
-
+            cls.logger.info(f"READY TASKRUNS TO QUEUE: {rows}")
             return [cls(TaskRunRow(**row)) for row in rows]
         except Exception as e:
-            print(e)
-            raise
+            cls.logger.exception("Failed to select_rows SKIPPING:")
+            return []
 
 
     def to_row(self) -> dict: #todo rename to serialize
@@ -231,8 +230,7 @@ class TaskRun(TaskRunRow):
             trs: TaskRunRow | list[TaskRunRow],
             state: TaskRunState | None = None,
             operation_id: str | None = None,
-    ) -> int:
-        print("TaskRun.update_state")
+    ) -> list[TaskRunRow]:
         if not isinstance(trs, list):
             trs = [trs]
 
@@ -268,12 +266,15 @@ class TaskRun(TaskRunRow):
 
         update = []
         for tr in trs:
+            TaskRun.logger.info(f"UPDATE taskrun={tr.task_id},{tr.id} row: "
+                                   f"{'state FROM ' + tr.state + ' TO ' + state if state else ''} "
+                                   f"{'operation_id FROM ' + (tr.operation_id or 'None') + ' TO ' + operation_id if operation_id else ''}")
             if state is not None:
                 _set_state(tr)
 
             if operation_id is not None:
                 tr.operation_id = operation_id
 
-            update.append(asdict(tr))
-        yt_client.insert_rows(TaskRunRow.table_path, update)
-        return len(update)
+            update.append(tr)
+        yt_client.insert_rows(TaskRunRow.table_path, [asdict(row) for row in update])
+        return update

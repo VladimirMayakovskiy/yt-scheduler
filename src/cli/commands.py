@@ -10,23 +10,27 @@ from yt.wrapper.schema import TableSchema, SortColumn
 
 def _ensure_table(yt_client: yt.YtClient, row_type: type):
     if not yt_client.exists(row_type.table_path):
-        schema = TableSchema.from_row_type(row_type, unique_keys=row_type.unique_keys)
-        for key in row_type.key_columns:
-            schema = schema.build_schema_sorted_by(SortColumn(key, SortColumn.ASCENDING))
-        yt_client.create("table", row_type.table_path, attributes={
-            "schema": schema ,
-            "dynamic": True
-        })
-        yt_client.mount_table(row_type.table_path, sync=True)
+        try:
+            schema = TableSchema.from_row_type(row_type, unique_keys=row_type.unique_keys)
+            for key in row_type.key_columns:
+                schema = schema.build_schema_sorted_by(SortColumn(key, SortColumn.ASCENDING))
+            yt_client.create("table", row_type.table_path, attributes={
+                "schema": schema ,
+                "dynamic": True
+            })
+            yt_client.mount_table(row_type.table_path, sync=True)
+        except Exception as e:
+            print(e) # TODO
+            raise
 
 def scheduler(args):
     yt_client = yt.YtClient(proxy=args.yt_proxy)
 
     _ensure_table(yt_client, DagEntityRow)
-    from dag_run import DagRun
-    _ensure_table(yt_client, DagRun)
-    from task_run import TaskRun
-    _ensure_table(yt_client, TaskRun)
+    from dag_run import DagRunRow
+    _ensure_table(yt_client, DagRunRow)
+    from task_run import TaskRunRow
+    _ensure_table(yt_client, TaskRunRow)
 
     scheduler = Scheduler(job = Job(), yt_client=yt_client)
     run_job(job=scheduler.job, execute_callable=scheduler._execute, yt_client=yt_client)
@@ -50,4 +54,4 @@ def add_dag(args):
     _ensure_table(yt_client, DagEntityRow)
     yt_client.insert_rows(DagEntityRow.table_path, [asdict(row)])
 
-    print(f"Dag registered: dag_id={DagEntityRow.dag_id}, work_dir={work_dir}")
+    print(f"Dag registered: dag_id={row.dag_id}, work_dir={work_dir}")

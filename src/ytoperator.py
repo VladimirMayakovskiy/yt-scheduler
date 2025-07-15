@@ -80,21 +80,21 @@ class SortOperator(BaseOperator):
 
 
     def run_operation(self, yt_client: yt.YtClient) -> str:
-        # yt_client.create("file", self.spec_path, force=True)
-        # yt_client.write_file(self.spec_path, json.dumps(self.spec))
 
-        # mapper = self.spec["mapper"]
-        # input_tables = self.spec.get("input_table_paths", [])
-        # output_tables = self.spec.get("output_table_paths", [])
-        #
-        # operation_id = yt_client.run_map(
-        #     mapper=mapper,
-        #     source_table=input_tables,
-        #     destination_table=output_tables[0],
-        #     spec=self.spec
-        # )
-        # return operation_id
-        return 0
+        input_tables = self.spec.get("input_table_paths", [])
+        output_tables = self.spec.get("output_table_paths", [])
+        sort_by = self.spec.get("output_table_paths", [])
+
+
+        spec_builder = yt.spec_builders.SortSpecBuilder() \
+            .input_table_paths(input_tables) \
+            .output_table_path(output_tables[0]) \
+            .sort_by("x")
+
+
+        operation_id =  yt_client.run_operation(spec_builder, sync=False)
+        print("Запущена операция, id =", operation_id, operation_id.id)
+        return operation_id
 
 operators = {"map": MapOperator,
              "sort": SortOperator}
