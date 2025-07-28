@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import typing
-
-if typing.TYPE_CHECKING:
-    from src.dag import DAG
-
 
 class DAGNode:
     dag_id: str
@@ -12,8 +7,9 @@ class DAGNode:
     preceding_task_ids: set[str]
     succeeding_task_ids: set[str]
 
-    def __init__(self, id: str):
+    def __init__(self, id: str, dag_id: str):
         self.id = id
+        self.dag_id = dag_id
         self.succeeding_task_ids = set()
         self.preceding_task_ids = set()
 

@@ -1,100 +1,76 @@
 from __future__ import annotations
 
-import json
-import time
+import os.path
+from copy import deepcopy
 from typing import TYPE_CHECKING
 import yt.wrapper as yt
-
-from state import TaskRunState
 
 if TYPE_CHECKING:
     from dag import DAG
 
 from dag_node import DAGNode
+from logging_mixin import LoggingMixin
 
 
-class BaseOperator(DAGNode):
-    dag_id: str
+def _process_table_paths(spec, work_dir, yt_client):
+    spec = deepcopy(spec)
+    if work_dir is None:
+        return spec
 
-    spec: dict
-    spec_path: str
+    processed_keys = [
+        "input_table_paths",
+        "output_table_paths",
+        "output_table_path",
+        "table_path",
+    ]
 
-    inlets: list[str]
-    outlets: list[str]
+    for key in processed_keys:
+        if key in spec:
+            prefix = yt.ypath.to_ypath(work_dir, client=yt_client)
+            result = [prefix.join(path).to_yson_type() for path in yt.common.flatten(spec[key])]
+            if isinstance(spec[key], list):
+                spec[key] = result
+            elif isinstance(spec[key], str):
+                spec[key] = result[0] # yt.ypath.ypath_join(work_dir, spec[key])
+    return spec
 
-    def __init__(self, task_id: str, dag_id: str, spec: dict):
-        print("INIT")
-        super().__init__(task_id)
-        self.dag_id = dag_id
-        self.spec = spec
-        self.spec_path = f"//home/specs/{dag_id}_{task_id}_{int(time.time())}.json"
-        self.inlets = spec.get("input_table_paths", [])
-        self.outlets = spec.get("output_table_paths", [])
+def make_operator(*, task_id: str, dag_id: str, spec: dict, yt_client, work_dir: str = None):
+    spec_builder_cls = dict({
+        builder_cls().operation_type: builder_cls
+        for builder_cls in yt.spec_builders.SpecBuilder.__subclasses__()
+    }).get(spec["operation_type"])
 
-    def run_operation(self, yt_client: yt.YtClient) -> str:
-        raise NotImplementedError
+    if spec_builder_cls is None:
+        return None
 
+    processed_keys = [
+        "operation_type",
+    ]
 
-class MapOperator(BaseOperator):
-    def __init__(self, task_id: str, dag_id: str, spec: dict):
-        super().__init__(task_id, dag_id, spec)
-        print("MAPOPERATOR")
-        # self.binary = spec["mapper"]["command"]
-        # self.input_tables  = spec["input_table_paths"]
-        # self.output_tables = spec["output_table_paths"]
+    for key in processed_keys:
+        if key in spec:
+            spec.pop(key)
 
+    spec_builder = spec_builder_cls()
+    spec_builder.spec(_process_table_paths(spec, work_dir, yt_client))
 
-    def run_operation(self, yt_client: yt.YtClient) -> str:
-        # yt_client.create("file", self.spec_path, force=True)
-        # yt_client.write_file(self.spec_path, json.dumps(self.spec))
+    return Operator(spec_builder, task_id, dag_id, work_dir)
 
-        mapper = self.spec["mapper"]
-        input_tables = self.spec.get("input_table_paths", [])
-        output_tables = self.spec.get("output_table_paths", [])
+class Operator(DAGNode, LoggingMixin):
+    def __init__(self, spec_builder, task_id: str, dag_id: str, work_dir: str = None):
+        super().__init__(task_id, dag_id)
 
-        print(mapper)
+        self.spec_builder = spec_builder
+        self.work_dir = work_dir
 
-        spec_builder = yt.spec_builders.MapSpecBuilder() \
-            .input_table_paths(input_tables) \
-            .output_table_paths(output_tables[0]) \
-            .begin_mapper() \
-                .command(mapper["command"]) \
-                .format(yt.YsonFormat()) \
-            .end_mapper()
+    def prepare_tables(self, yt_client: yt.YtClient):
+        self.spec_builder._prepare_tables(client=yt_client)
 
+    def get_input_table_paths(self):
+        return self.spec_builder.get_input_table_paths()
 
-        operation_id =  yt_client.run_operation(spec_builder, sync=False)
-        print("Запущена операция, id =", operation_id, operation_id.id)
-        # operation_id = yt_client.run_map(
-        #     mapper,
-        #     source_table=input_tables,
-        #     destination_table=output_tables[0],
-        #     spec=self.spec
-        # )
-        return operation_id
-
-class SortOperator(BaseOperator):
-    def __init__(self, task_id: str, dag_id: str, spec: dict):
-        super().__init__(task_id, dag_id, spec)
-        print("SORT OPERATOR")
-
+    def get_output_table_paths(self):
+        return self.spec_builder.get_output_table_paths()
 
     def run_operation(self, yt_client: yt.YtClient) -> str:
-
-        input_tables = self.spec.get("input_table_paths", [])
-        output_tables = self.spec.get("output_table_paths", [])
-        sort_by = self.spec.get("output_table_paths", [])
-
-
-        spec_builder = yt.spec_builders.SortSpecBuilder() \
-            .input_table_paths(input_tables) \
-            .output_table_path(output_tables[0]) \
-            .sort_by("x")
-
-
-        operation_id =  yt_client.run_operation(spec_builder, sync=False)
-        print("Запущена операция, id =", operation_id, operation_id.id)
-        return operation_id
-
-operators = {"map": MapOperator,
-             "sort": SortOperator}
+        return yt_client.run_operation(self.spec_builder, sync=False, enable_optimizations=True)

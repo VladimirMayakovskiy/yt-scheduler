@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Iterable, Any, NamedTuple, Callable, Sequence
 import argparse
 
-from .commands import scheduler, add_dag
+from .commands import *
 
 
 class CLIArg:
@@ -36,11 +36,13 @@ def _add_commands(parser: argparse.ArgumentParser, commands: Iterable[CLICommand
             sub_proc = subparsers.add_parser(cmd.name, help=cmd.description)
             for arg in cmd.args:
                 sub_proc.add_argument(*arg.flags, **arg.kwargs)
-
             if cmd.subcommands:
                 _add_commands(sub_proc, cmd.subcommands)
             else:
                 sub_proc.set_defaults(func=cmd.func)
+
+ARG_YT_PROXY = CLIArg(flags=["--yt-proxy"], help='yt proxy for YTsaurus client', required=True)
+ARG_RUN_ID = CLIArg(flags=["--run-id"], help="The id of the dag.", required=True)
 
 commands_ = (
     CLICommand(
@@ -51,28 +53,61 @@ commands_ = (
             CLICommand(
                 name="run",
                 description="run scheduler",
-                func=scheduler,
+                func=run_scheduler,
                 args=(
-                    CLIArg(flags=["--yt-proxy"], help='yt proxy for YTsaurus client', required=False),
+                    ARG_YT_PROXY,
                 )
             ),
         )
     ),
     CLICommand(
-        name="dag",
+        name="dags",
         description="dag commands",
         args=(),
         subcommands=(
             CLICommand(
-                name="run",
+                name="add",
                 description="add dag to scheduler",
                 func=add_dag,
                 args=(
-                    CLIArg(flags=["--yt-proxy"], help='yt proxy for YTsaurus client', required=False),
+                    ARG_YT_PROXY,
                     CLIArg(flags=["--spec"], help="Path to the workflow specification (YAML file).", required=True),
                     CLIArg(flags=["--work-dir"], help="Working directory for the pipeline.", required=False),
                 )
             ),
+            CLICommand(
+                name="state",
+                description="Get the status of a dag run",
+                func=dag_run_state,
+                args=(
+                    ARG_YT_PROXY,
+                    ARG_RUN_ID,
+                )
+            ),
+        )
+    ),
+    CLICommand(
+        name="tasks",
+        description="task commands",
+        args=(),
+        subcommands=(
+            CLICommand(
+                name="list-runs",
+                description="List the taskruns within a dag run",
+                func=taskrun_list,
+                args=(
+                    ARG_YT_PROXY,
+                    ARG_RUN_ID,
+                )
+            ),
+        )
+    ),
+    CLICommand(
+        name="init",
+        description="initialize database",
+        func=init,
+        args=(
+            ARG_YT_PROXY,
         )
     )
 )

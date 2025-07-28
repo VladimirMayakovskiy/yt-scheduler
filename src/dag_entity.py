@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from importlib import import_module
-
 from typing import ClassVar
 from dataclasses import field
 import uuid

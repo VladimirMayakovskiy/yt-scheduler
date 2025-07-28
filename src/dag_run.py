@@ -36,25 +36,12 @@ class DagRunRow:
 
     start_date: str
     end_date: Optional[str] = None
+    #updated_at
 
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 # @yt.yt_dataclass
 class DagRun(DagRunRow, LoggingMixin):
-    # table_path:  ClassVar[str] = "//tmp/dag_run"
-    # key_columns: ClassVar[list[str]] = ["run_id"]
-    # unique_keys: ClassVar[bool] = True
-    #
-    # run_id: str # TODO field
-    # dag_id: str
-    # # creating_job_id: str
-    #
-    # start_date: Optional[str]
-    # end_date: Optional[str]
-    # # updated_at: datetime
-    #
-    # state: str # DagRunState
-
     def __init__(
             self,
             row: DagRunRow | None = None,
@@ -151,7 +138,7 @@ class DagRun(DagRunRow, LoggingMixin):
         self.log.info(f"Get all existing taskruns for dagrun={self.run_id} : {trs}")
 
         unfinished_trs = [t for t in trs if t.state in
-                          [TaskRunState.RUNNING, TaskRunState.QUEUED, TaskRunState.READY, TaskRunState.SCHEDULED]]
+                          [TaskRunState.RUNNING, TaskRunState.QUEUED, TaskRunState.SCHEDULED]] # TaskRunState.READY,
         schedulable_trs = [t for t in trs if t.state == TaskRunState.SCHEDULED]
         finished_trs = [t for t in trs if t.state in [TaskRunState.FAILED, TaskRunState.SUCCESS]]
 
@@ -200,7 +187,7 @@ class DagRun(DagRunRow, LoggingMixin):
     ) -> int:
         try:
             if schedulable_trs:
-                return len(TaskRun.update_rows(yt_client, schedulable_trs, state=TaskRunState.READY))
+                return len(TaskRun.update_rows(yt_client, [TaskRun.TaskRunUpdateRow(tr=tr, state=TaskRunState.QUEUED) for tr in schedulable_trs]))
             return 0
         except Exception as e:
             DagRun.logger.exception("Failed to update rows SKIPPING:")
@@ -282,7 +269,7 @@ class DagRun(DagRunRow, LoggingMixin):
                     task_id=task.task_id,
                     run_id=self.run_id,
                     dag_id=self.dag_id,
-                    state=TaskRunState.SCHEDULED,
+                    state=TaskRunState.SCHEDULED, #TODO
                 )
                 for task in tasks_to_create
                 if task in self.dag.roots
@@ -316,3 +303,30 @@ class DagRun(DagRunRow, LoggingMixin):
         except Exception as e:
             DagRun.logger.exception("Failed to insert rows:")
             raise
+
+    @staticmethod
+    def fetch_dagruns(yt_client: yt.YtClient, dag_id: str = None, run_id: str = None) -> list["DagRun"]:
+        if not yt_client.exists(DagRun.table_path):
+            return []
+
+        conditions: list[str] = []
+        if run_id is not None:
+            conditions.append(f"dr.run_id = '{run_id}'")
+        if dag_id is not None:
+            conditions.append(f"dr.dag_id = '{dag_id}'")
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+        DagRun.logger.info(f"fetch_dagruns: {where_clause}")
+        try:
+            rows = list(yt_client.select_rows(
+                f"""
+                {get_all_table_fields(DagRunRow, "dr")} 
+                FROM [{DagRun.table_path}] AS dr
+                {where_clause}
+                """
+            ))
+        except Exception as e:
+            DagRun.logger.exception("Failed to select rows:")
+            raise
+        return [DagRun(DagRunRow(**row)) for row in rows]

@@ -9,7 +9,7 @@ class JobState(str, Enum):
         return self.value
 
 class DagRunState(str, Enum):
-    QUEUED = "queued" # шедулер начал обрабатывать dagrun: хотя бы одна задача dagrun SCHEDULED, но ни одной в READY ????????
+    QUEUED = "queued" # шедулер начал обрабатывать dagrun: хотя бы одна задача dagrun SCHEDULED, но ни одной в READY
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
@@ -19,8 +19,7 @@ class DagRunState(str, Enum):
 
 class TaskRunState(str, Enum):
     SCHEDULED = "scheduled"
-    READY = "ready" # задача  запланирована для запуска. Шедулер решил что можно запускать но пока еще не передал задачу в Экзекьютор
-    QUEUED = "queued" # задача поставлена в очередь Экзекьютора. Ожидает фактичесвкого запуска на исполнение
+    QUEUED = "queued" # задача запланирована для запуска. Шедулер решил что можно запускать
     RUNNING = "running" # задача активно выполняется
     SUCCESS = "success" # задача успешно завершилась
     FAILED = "failed"

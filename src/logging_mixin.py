@@ -5,7 +5,7 @@ from typing import Any, TypeVar
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s.%(funcName)s:%(lineno)d: %(message)s"
+    format="%(asctime)s %(levelname)-8s module=%(module)-15s %(message)s (%(pathname)s:%(lineno)d)"
 )
 
 _T = TypeVar("_T")

@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from dag_run import DagRun
 
 
-from ytoperator import BaseOperator
 from state import TaskRunState
 from logging_mixin import LoggingMixin
 
@@ -32,6 +31,7 @@ class TaskRunRow:
     queued_at: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    #update_at: Optional[str] = None
 
     operation_id: Optional[str] = None
 
@@ -39,24 +39,6 @@ class TaskRunRow:
 
 # @yt.yt_dataclass
 class TaskRun(TaskRunRow, LoggingMixin):
-    # table_path:  ClassVar[str] = "//tmp/task_run"
-    # key_columns: ClassVar[list[str]] = ["id"]
-    # unique_keys: ClassVar[bool] = True
-    #
-    # id: str
-    # task_id: str
-    # run_id: str
-    # dag_id: str
-    #
-    # scheduled_at: str
-    # queued_at: Optional[str]
-    # start_date: Optional[str]
-    # end_date: Optional[str]
-    # # updated_at: datetime
-    #
-    # state: str # TaskRunState
-    #
-    # operation_id: Optional[str] = None
 
     def __init__(
             self,
@@ -71,15 +53,10 @@ class TaskRun(TaskRunRow, LoggingMixin):
             start_date: str | None = None,
             end_date: str | None = None,
             operation_id: str | None = None,
-            # task: BaseOperator | None = None,
-            # dag_run: DagRun | None = None,
     ):
         if row is not None:
             super().__init__(**asdict(row))
         else:
-        # task_id = task_id if task_id else task.task_id
-        # run_id = run_id if run_id else dag_run.run_id
-        # dag_id = dag_id if dag_id else dag_run.dag_id
             state = state if state else TaskRunState.SCHEDULED
 
             scheduled_at = scheduled_at or datetime.utcnow().isoformat()
@@ -96,22 +73,6 @@ class TaskRun(TaskRunRow, LoggingMixin):
                 operation_id=operation_id,
             )
 
-        # self.task = task
-        # self.dag_id = dag_id if dag_id else (task.dag_id if task else None)
-        # self.task_id = task_id if task_id else (task.task_id if task else None)
-        # self.dag_run = dag_run
-        # self.id = id or uuid.uuid4().hex
-        # self.scheduled_at = scheduled_at or datetime.utcnow().isoformat()
-        # self.queued_at = queued_at
-        # if state:
-        #     self.state = state
-        # else:
-        #     self.state = ""
-        #
-        # self.start_date = start_date
-        # self.end_date = end_date
-        #
-        # self.operation_id = operation_id
     @classmethod
     def get_executable_task_runs_to_queued(cls, yt_client: yt.YtClient) -> list["TaskRun"]:
         from dag_run import get_all_table_fields
@@ -121,7 +82,7 @@ class TaskRun(TaskRunRow, LoggingMixin):
                     f"""
                     {get_all_table_fields(TaskRunRow, "tr")}
                     FROM [{TaskRun.table_path}] AS tr
-                    WHERE tr.state = '{TaskRunState.READY}'
+                    WHERE tr.state = '{TaskRunState.QUEUED}'
                     LIMIT 1
                     """
                 ))
@@ -191,90 +152,59 @@ class TaskRun(TaskRunRow, LoggingMixin):
 
         return " or ".join(filter_condition)
 
-    # def set_state(self, state: TaskRunState, yt_client: yt.YtClient) -> None:
-    #     print("TASKRUN.set_state, cur: ", self.state, "new: ", state)
-    #
-    #     if self.state != state:
-    #         if state == TaskRunState.SCHEDULED:
-    #             self.scheduled_at = datetime.utcnow().isoformat()
-    #             self.queued_at = None
-    #             self.start_date = None
-    #             self.end_date = None
-    #         elif state == TaskRunState.READY:
-    #             self.scheduled_at = self.scheduled_at or datetime.utcnow().isoformat()
-    #             self.queued_at = None
-    #             self.start_date = None
-    #             self.end_date = None
-    #         elif state == TaskRunState.QUEUED:
-    #             self.scheduled_at = self.scheduled_at or datetime.utcnow().isoformat()
-    #             self.queued_at = datetime.utcnow().isoformat()
-    #             self.start_date = None
-    #             self.end_date = None
-    #         elif state == TaskRunState.RUNNING:
-    #             self.scheduled_at = self.scheduled_at or datetime.utcnow().isoformat()
-    #             self.queued_at = self.queued_at or datetime.utcnow().isoformat()
-    #             self.start_date = datetime.utcnow().isoformat()
-    #             self.end_date = None
-    #         else:
-    #             if state not in [TaskRunState.SUCCESS, TaskRunState.FAILED]:
-    #                 self.end_date = datetime.utcnow().isoformat()
-    #         self.state = state
-    #     else:
-    #         # TODO
-    #         pass
-    #
-    #     yt_client.insert_rows(TaskRunRow.table_path, [asdict(self)])
+    class TaskRunUpdateRow:
+        def __init__(self, tr: TaskRunRow, state: TaskRunState | None = None, operation_id: str | None = None):
+            self.tr = tr
+            if state:
+                self.state = state
+            else:
+                self.state = tr.state
+            if operation_id:
+                self.operation_id = operation_id
+            else:
+                self.operation_id = tr.operation_id
+
     @staticmethod
     def update_rows(
             yt_client: yt.YtClient,
-            trs: TaskRunRow | list[TaskRunRow],
-            state: TaskRunState | None = None,
-            operation_id: str | None = None,
+            trus : TaskRunUpdateRow | list[TaskRunUpdateRow],
     ) -> list[TaskRunRow]:
-        if not isinstance(trs, list):
-            trs = [trs]
+        if not isinstance(trus, list):
+            trus = [trus]
 
-        def _set_state(tr: TaskRunRow):
-            if tr.state != state:
-                if state == TaskRunState.SCHEDULED:
-                    tr.scheduled_at = datetime.utcnow().isoformat()
-                    tr.queued_at = None
-                    tr.start_date = None
-                    tr.end_date = None
-                elif state == TaskRunState.READY:
-                    tr.scheduled_at = tr.scheduled_at or datetime.utcnow().isoformat()
-                    tr.queued_at = None
-                    tr.start_date = None
-                    tr.end_date = None
-                elif state == TaskRunState.QUEUED:
-                    tr.scheduled_at = tr.scheduled_at or datetime.utcnow().isoformat()
-                    tr.queued_at = datetime.utcnow().isoformat()
-                    tr.start_date = None
-                    tr.end_date = None
-                elif state == TaskRunState.RUNNING:
-                    tr.scheduled_at = tr.scheduled_at or datetime.utcnow().isoformat()
-                    tr.queued_at = tr.queued_at or datetime.utcnow().isoformat()
-                    tr.start_date = datetime.utcnow().isoformat()
-                    tr.end_date = None
-                else:
-                    if tr.state not in [TaskRunState.SUCCESS, TaskRunState.FAILED]:
-                        tr.end_date = datetime.utcnow().isoformat()
-                tr.state = state
+        def _set_state(tru: TaskRun.TaskRunUpdateRow):
+            if tru.tr.state != tru.state:
+                if tru.state in [TaskRunState.SCHEDULED, TaskRunState.QUEUED, TaskRunState.RUNNING]:
+                    if tru.tr.state in [TaskRunState.SUCCESS, TaskRunState.FAILED]:
+                        tru.tr.scheduled_at, tru.tr.queued_at, tru.tr.start_date, tru.tr.end_date = None, None, None, None
+
+                    if tru.state == TaskRunState.RUNNING:
+                        tru.tr.start_date = datetime.utcnow().isoformat() # TODO get from op
+
+                    if tru.tr.state in [TaskRunState.RUNNING, TaskRunState.QUEUED]:
+                        tru.tr.queued_at = tru.tr.queued_at or datetime.utcnow().isoformat()
+
+                    tru.tr.scheduled_at = tru.tr.scheduled_at or datetime.utcnow().isoformat()
+                    tru.tr.end_date = None
+                elif tru.state in [TaskRunState.SUCCESS, TaskRunState.FAILED] and tru.tr.state in [TaskRunState.SCHEDULED, TaskRunState.QUEUED, TaskRunState.RUNNING]:
+                    tru.tr.end_date = datetime.utcnow().isoformat()
+
+                tru.tr.state = tru.state
             else:
                 # TODO
                 pass
 
         update = []
-        for tr in trs:
-            TaskRun.logger.info(f"UPDATE taskrun={tr.task_id},{tr.id} row: "
-                                   f"{'state FROM ' + tr.state + ' TO ' + state if state else ''} "
-                                   f"{'operation_id FROM ' + (tr.operation_id or 'None') + ' TO ' + operation_id if operation_id else ''}")
-            if state is not None:
-                _set_state(tr)
+        for tru in trus:
+            TaskRun.logger.info(f"UPDATE taskrun={tru.tr.task_id},{tru.tr.id} row: "
+                                   f"{'state FROM ' + tru.tr.state + ' TO ' + tru.state if tru.state else ''} "
+                                   f"{'operation_id FROM ' + (tru.tr.operation_id or 'None') + ' TO ' + tru.operation_id if tru.operation_id else ''}")
+            if tru.state is not None:
+                _set_state(tru)
 
-            if operation_id is not None:
-                tr.operation_id = operation_id
+            if tru.operation_id is not None:
+                tru.tr.operation_id = tru.operation_id
 
-            update.append(tr)
+            update.append(tru.tr)
         yt_client.insert_rows(TaskRunRow.table_path, [asdict(row) for row in update])
         return update

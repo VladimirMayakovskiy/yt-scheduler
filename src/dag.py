@@ -9,7 +9,7 @@ import yaml
 from dag_entity import DagEntity
 from dag_run import DagRun, DagRunRow
 from dag_node import DAGNode
-from ytoperator import BaseOperator, operators
+from ytoperator import make_operator, Operator
 from state import DagRunState
 from logging_mixin import LoggingMixin
 
@@ -40,36 +40,33 @@ class DAG(LoggingMixin):
 
         spec = yaml.safe_load(yt_client.read_file(de.spec_path))
 
-        outlets_producers: dict[str, list[BaseOperator]] = {} # TODO
+        outlets_producers: dict[str, list[Operator]] = {} # TODO
         for task_id, params in spec.get("steps", {}).items():
             cls.logger.info(f"STEP: {task_id}\nspec: {params}")
             cfg = dict(params)
-            inlets = cfg.pop('input_table_paths', [])
-            outlets = cfg.pop('output_table_paths', [])
+            # inlets = cfg.pop('input_table_paths', [])
+            # outlets = cfg.pop('output_table_paths', [])
+            #
+            # abs_inlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in inlets]
+            # abs_outlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in outlets]
+            #
+            # cfg['input_table_paths'] = abs_inlets
+            # cfg['output_table_paths'] = abs_outlets
 
-            abs_inlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in inlets]
-            abs_outlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in outlets]
-
-            cfg['input_table_paths'] = abs_inlets
-            cfg['output_table_paths'] = abs_outlets
-
-            operation = cfg.get("operation", "")
-            operator_cls = operators.get(operation)
-            # cls.logger.info("CREATE OPERATOR: ", operator_cls) todo in operator
-            if not operator_cls:
-                # todo make failed
-                cls.logger.error(f"Unknown operator type: {operation}")
-                continue
-
-            operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg) # TODO
+            operator = make_operator(task_id=task_id, dag_id=dag.dag_id, spec=cfg, yt_client=yt_client, work_dir=dag.work_dir)
+            if operator is None:
+                raise ValueError(f"Unknown operator type: {cfg.get('operation_type', '')}")
+            operator_cls = operator.__class__
+            # operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg, workdir=dag.work_dir) # TODO
             dag.task_dict[task_id] = operator
 
-            for outlet in abs_outlets:
+            cls.logger.info(f"OPERATOR: {operator_cls}")
+            for outlet in operator.get_output_table_paths():
                 outlets_producers.setdefault(outlet, []).append(operator)
 
         #TODO upstreams, downstreams
         for tid, op in dag.task_dict.items():
-            for inlet in op.inlets:
+            for inlet in op.get_input_table_paths(): # [tid]:
                 if producers := outlets_producers.get(inlet):
                     op.set_upstream(producers)
 
