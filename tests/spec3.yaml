@@ -1,0 +1,11 @@
+steps:
+  first_sort:
+    operation: sort
+    input_table_paths: [ "input_table1" ]
+    output_table_paths: [ "output_table" ]
+    sort_by: [ "x" ]
+  last_sort:
+    operation: sort
+    input_table_paths: [ "output_table", "input_table2" ]
+    output_table_paths: [ "output_table2" ]
+    sort_by: ["x"]

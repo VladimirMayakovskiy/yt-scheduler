@@ -1,0 +1,8 @@
+steps:
+  step_map:
+    operation_type: map
+    input_table_paths: [ "input_table" ]
+    output_table_paths: [ "output_table" ]
+    mapper:
+      command: cat
+      format: yson
