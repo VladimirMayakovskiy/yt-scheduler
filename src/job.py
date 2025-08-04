@@ -10,7 +10,7 @@ from state import JobState
 
 
 @yt.yt_dataclass
-class Job: #TODO возможно стоит переименовать в SchedulerJob, прокинуть логгирование, регистрацию через фабрику executor
+class Job:
     # Для отслеживания и логгирования состояния задач, не являющихся задачами графа, то есть Scheduler
     id: str
 
