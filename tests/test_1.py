@@ -32,7 +32,7 @@ def run_cli(cmd: list[str]):
     return subprocess.run([sys.executable, "src/main.py", *cmd], check=True, capture_output=True, text=True)
 
 def run_add_dag(spec_path: str, workdir: str, yt_proxy: str):
-    completed = run_cli(["dag", "run", "--spec", spec_path, "--yt-proxy", yt_proxy, '--work-dir', workdir])
+    completed = run_cli(["dags", "add", "--spec", spec_path, "--yt-proxy", yt_proxy, '--work-dir', workdir])
     assert completed.returncode == 0
     _, _, dag_id_part = completed.stdout.partition("dag_id=")
     dag_id = dag_id_part.split(",")[0]
