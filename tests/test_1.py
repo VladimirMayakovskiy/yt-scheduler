@@ -11,10 +11,6 @@ import yt.wrapper as yt
 import os
 
 
-@pytest.fixture(scope="session")
-def yt_client() -> yt.YtClient:
-    return yt.YtClient(proxy='localhost:8000')
-
 @pytest.fixture
 def spec_file():
     def _spec_file(spec_path: str):
@@ -23,9 +19,9 @@ def spec_file():
         return spec
     return _spec_file
 
-def start_scheduler(estop: threading.Event):
+def start_scheduler(estop: threading.Event, yt_proxy: str):
     p = subprocess.Popen(
-        [sys.executable, "src/main.py", "scheduler", "run", "--yt-proxy", 'localhost:8000'],
+        [sys.executable, "src/main.py", "scheduler", "run", "--yt-proxy", yt_proxy],
     )
     estop.wait()
     p.kill()
@@ -35,8 +31,8 @@ def start_scheduler(estop: threading.Event):
 def run_cli(cmd: list[str]):
     return subprocess.run([sys.executable, "src/main.py", *cmd], check=True, capture_output=True, text=True)
 
-def run_add_dag(spec_path: str, workdir: str):
-    completed = run_cli(["dag", "run", "--spec", spec_path, "--yt-proxy", 'localhost:8000', '--work-dir', workdir])
+def run_add_dag(spec_path: str, workdir: str, yt_proxy: str):
+    completed = run_cli(["dags", "add", "--spec", spec_path, "--yt-proxy", yt_proxy, '--work-dir', workdir])
     assert completed.returncode == 0
     _, _, dag_id_part = completed.stdout.partition("dag_id=")
     dag_id = dag_id_part.split(",")[0]
@@ -60,17 +56,17 @@ def check_dag_run_completed(yt_client: yt.YtClient, dag_id: str):
     return False, [], []
 
 
-def test_add_and_test_sort_simple(yt_client, spec_file):
+def test_add_and_test_sort_simple(yt_client, yt_proxy, spec_file):
     spec_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'spec2.yaml'))
     spec = spec_file(spec_path)
     print(spec)
 
-    dag_id = run_add_dag(spec_path, '//tmp/example_sort_simple')
+    dag_id = run_add_dag(spec_path, '//tmp/example_sort_simple', yt_proxy=yt_proxy)
 
     yt_client.write_table("//tmp/example_sort_simple/input_table1", [{"x": 2}, {"x": 1}])
 
     estop = threading.Event()
-    thread = threading.Thread(target=start_scheduler, args=(estop,), daemon=True)
+    thread = threading.Thread(target=start_scheduler, args=(estop, yt_proxy), daemon=True)
     thread.start()
 
     time.sleep(30)
@@ -86,12 +82,12 @@ def test_add_and_test_sort_simple(yt_client, spec_file):
     expected = [{"x": 1}, {"x": 2}]
     assert out == expected
 
-def test_add_and_test_sort_2steps(yt_client, spec_file):
+def test_add_and_test_sort_2steps(yt_client, yt_proxy, spec_file):
     spec_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'spec3.yaml'))
     spec = spec_file(spec_path)
     print(spec)
 
-    dag_id = run_add_dag(spec_path, '//tmp/example_sort_2steps')
+    dag_id = run_add_dag(spec_path, '//tmp/example_sort_2steps', yt_proxy)
 
     yt_client.write_table("//tmp/example_sort_2steps/input_table1", [{"x": 5}, {"x": 4}])
     yt_client.write_table("//tmp/example_sort_2steps/input_table2", [{"x": 2}, {"x": 1}])
@@ -99,7 +95,7 @@ def test_add_and_test_sort_2steps(yt_client, spec_file):
     yt_client.create("table", "//tmp/example_sort_2steps/output_table2", force=True)
 
     estop = threading.Event()
-    thread = threading.Thread(target=start_scheduler, args=(estop,), daemon=True)
+    thread = threading.Thread(target=start_scheduler, args=(estop, yt_proxy), daemon=True)
     thread.start()
 
     time.sleep(60)
@@ -118,12 +114,12 @@ def test_add_and_test_sort_2steps(yt_client, spec_file):
     assert out1 == expected1
     assert out2 == expected2
 
-def test_add_and_test_sort(yt_client, spec_file):
+def test_add_and_test_sort(yt_client, yt_proxy, spec_file):
     spec_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'spec_sort.yaml'))
     spec = spec_file(spec_path)
     print(spec)
 
-    dag_id = run_add_dag(spec_path, '//tmp/example_sort')
+    dag_id = run_add_dag(spec_path, '//tmp/example_sort', yt_proxy=yt_proxy)
 
     yt_client.write_table("//tmp/example_sort/input_table1", [{"x": 100}, {"x": 10}])
     yt_client.write_table("//tmp/example_sort/input_table2", [{"x": 1}, {"x": 20}])
@@ -134,7 +130,7 @@ def test_add_and_test_sort(yt_client, spec_file):
     yt_client.create("table", "//tmp/example_sort/output_table4", force=True)
 
     estop = threading.Event()
-    thread = threading.Thread(target=start_scheduler, args=(estop,), daemon=True)
+    thread = threading.Thread(target=start_scheduler, args=(estop, yt_proxy), daemon=True)
     thread.start()
 
     time.sleep(120)
