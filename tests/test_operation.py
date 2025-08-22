@@ -11,10 +11,6 @@ import os
 from src.cli.commands import add_dag
 from argparse import Namespace
 
-@pytest.fixture(scope="session")
-def yt_client() -> yt.YtClient:
-    return yt.YtClient(proxy='localhost:8000')
-
 @pytest.fixture
 def prepare_workdir(request, yt_client):
     # test_name = request.node.name
@@ -47,17 +43,17 @@ def run_cli(cmd: list[str]):
     return subprocess.run([sys.executable, "src/main.py", *cmd], check=True, capture_output=True, text=True)
 
 
-def run_add_dag(spec_path: str, workdir: str):
-    completed = run_cli(["dags", "add", "--spec", spec_path, "--yt-proxy", 'localhost:8000', '--work-dir', workdir])
+def run_add_dag(spec_path: str, yt_proxy, workdir: str):
+    completed = run_cli(["dags", "add", "--spec", spec_path, "--yt-proxy", yt_proxy, '--work-dir', workdir])
     assert completed.returncode == 0
     _, _, dag_id_part = completed.stdout.partition("dag_id=")
     dag_id = dag_id_part.split(",")[0]
     assert dag_id
     return dag_id
 
-def test_operation_success(yt_client, prepare_workdir):
+def test_operation_success(yt_client, yt_proxy, prepare_workdir):
     workdir, spec_path = prepare_workdir
-    dag_id = add_dag(Namespace(**{"spec": spec_path, "work_dir": workdir, "yt_proxy": 'localhost:8000'}))
+    dag_id = add_dag(Namespace(**{"spec": spec_path, "work_dir": workdir, "yt_proxy": yt_proxy}))
 
     while not check_dag_run_completed(yt_client, dag_id):
         time.sleep(5)
@@ -67,9 +63,9 @@ def test_operation_success(yt_client, prepare_workdir):
     expected = [{"x": 1}, {"x": 2}]
     assert out == expected
 
-def test_operation_aborted(yt_client, prepare_workdir):
+def test_operation_aborted(yt_client, yt_proxy, prepare_workdir):
     workdir, spec_path = prepare_workdir
-    dag_id = add_dag(Namespace(**{"spec": spec_path, "work_dir": workdir, "yt_proxy": 'localhost:8000'}))
+    dag_id = add_dag(Namespace(**{"spec": spec_path, "work_dir": workdir, "yt_proxy": yt_proxy}))
 
     from src.dag_run import DagRun
     op = DagRun.fetch_task_runs(yt_client, dag_id=dag_id)
@@ -90,9 +86,9 @@ def test_operation_aborted(yt_client, prepare_workdir):
     assert op[0].state == "failed"
 
 
-# def test_operation_suspend(yt_client, prepare_workdir):
+# def test_operation_suspend(yt_client, yt_proxy, prepare_workdir):
 #     workdir, spec_path = prepare_workdir
-#     dag_id = add_dag(Namespace(**{"spec": spec_path, "work_dir": workdir, "yt_proxy": 'localhost:8000'}))
+#     dag_id = add_dag(Namespace(**{"spec": spec_path, "work_dir": workdir, "yt_proxy": yt_proxy}))
 #
 #     from src.dag_run import DagRun
 #     op = DagRun.fetch_task_runs(yt_client, dag_id=dag_id)
