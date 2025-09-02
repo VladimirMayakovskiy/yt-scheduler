@@ -1,147 +1,183 @@
 from __future__ import annotations
-
 import time
+from dataclasses import asdict
 from typing import Callable
-import yt.wrapper as yt
 
 from dag import DAG
-from dag_run import DagRun
-from job import Job
-from state import JobState, DagRunState, TaskRunState
-from dag_entity import DagEntity
-from task_run import TaskRun, TaskRunRow
-from executor import Executor
-from logging_mixin import LoggingMixin
+from dagrun import DagRun
+from state import DagRunState
+from taskrun import TaskRun
+from task_runner import TaskRunner
+from dagref import DagRef
+from job import JobBase, classproperty, JobContext
+from yt_wrapper import with_yt_client
 
+import yt.wrapper as yt
 
-def run_job(
-        job: Job, execute_callable: Callable[[], int | None], yt_client: yt.YtClient
-) -> int | None:
-    job.prepare_for_execution(yt_client=yt_client)
-    try:
-        ret = None
-        try:
-            ret = execute_callable()
-            job.state = JobState.SUCCESS
-        except SystemExit:
-            job.state = JobState.SUCCESS
-        except Exception:
-            job.state = JobState.FAILED
-            raise
-        return ret
-    finally:
-        job.complete_execution(yt_client=yt_client)
-
-
-class Scheduler(LoggingMixin):
+class Scheduler(JobBase):
     def __init__(
-            self,
-            job : Job,
-            yt_client: yt.YtClient,
-            scheduler_idle_sleep_time: float = 10,
+        self,
+        context: JobContext,
+        scheduler_idle_sleep_time: float = 5.0,
     ):
-        self.job = job
-        self.yt_client = yt_client
+        super().__init__(context)
+
+        self._executor: TaskRunner = self.context.find(TaskRunner)
+
+        assert self._executor is not None, "Executor not found in context"
+        assert self.context.pool_executor is not None, "Pool executor not found in context"
+
+        if self._executor is None:
+            raise RuntimeError("Executor not found in context")
+
         self._scheduler_idle_sleep_time = scheduler_idle_sleep_time
         self._dag_cache: dict[str, DAG] = {}
 
-    def _get_dag(self, de: DagEntity) -> DAG:
-        if de.dag_id not in self._dag_cache:
-            self._dag_cache[de.dag_id] = DAG.from_dag_entity(de, self.yt_client)
-        return self._dag_cache[de.dag_id]
+        self._created_dagruns_since_last_tick = 0
+
+    @classproperty
+    def name(self) -> str:
+        return "scheduler"
+
+    @property
+    def _entry(self) -> Callable[[], int | None]:
+        return self._execute
+
+    def _get_dag(self, ref: DagRef.row_type) -> DAG:
+        if ref.dag_id not in self._dag_cache:
+            self._dag_cache[ref.dag_id] = DAG.from_serialized_dag(ref, context_wrapper=self.client_context)
+        return self._dag_cache[ref.dag_id]
 
     def _execute(self) -> int | None:
         self.log.info("Starting the scheduler")
         try:
-            self.job.executor.start()
             self._run_scheduler_loop()
-        except Exception:
+        except Exception as e:
+            print(e)
             raise
         finally:
-            self.job.executor.end()
             self.log.info("Exited execute loop")
             return None
 
     def _run_scheduler_loop(self):
-        while True:
-            self.log.info("\nONE STEP OF SCHEDULER LOOP")
-            num_queued = self._do_scheduling()
+        try:
+            while not self._runner.stop_event.is_set():
+                self.log.info("\n\nONE STEP OF SCHEDULER LOOP")
 
-            self.job.executor.heartbeat(self.yt_client)
+                num_scheduled = self._do_scheduling() # один шаг планирования # todo return num_queued
 
-            if not num_queued:
-                time.sleep(self._scheduler_idle_sleep_time)
+                self.context.pool_executor.process_callbacks() # обрабатываем все завершившиеся колбеки todo
+
+                # self._executor.heartbeat_async() # уведомляем executor todo check
+
+                if not num_scheduled:
+                    time.sleep(self._scheduler_idle_sleep_time)
+        except Exception as e:
+            print(e)
+            raise
 
     def _do_scheduling(self) -> int:
-        created = self._create_dagruns_for_dags()
-        self.log.info(f"CREATED DAGRUNS: {created}")
-        self._start_queued_dagruns() # запуск и проверка существующих дагран
-
+        self._create_dagruns_for_dags()
+        self._queue_scheduled_dagruns()
+        self._start_queued_dagruns()
         self._schedule_running_dagruns()
+        self._enqueue_task_runs()
+        return self._created_dagruns_since_last_tick
 
-        self.log.info("TRANSFERRING TASK TO EXECUTOR")
-        num_queued = self._enqueue_task_runs() # переводим задачи в QUEUED; отправляем в executor
-        self.log.info(f"NUM_QUEUED: {num_queued}")
-        return num_queued
+    def _create_dagruns_for_dags(self):
+        num_created = self.context.pool_executor.submit(
+            self._try_claim_dagruns, context=self.client_context, block=False
+        )
+        @num_created.on_complete
+        def _():
+            self.log.info(f"CREATED DAGRUNS: {num_created.result}")
+            self._created_dagruns_since_last_tick = num_created.result
 
-    def _create_dagruns_for_dags(self) -> int:
-        all_dags_needing_dag_runs = DagEntity.dags_needing_dagruns(self.yt_client)
-        created = 0
-        for de in all_dags_needing_dag_runs:
-            try:
-                dag = self._get_dag(de)
-                DAG.create_dagrun(
-                    yt_client=self.yt_client,
-                    dag=dag,
-                    state=DagRunState.QUEUED,
-                    creating_job_id=self.job.id,
-                )
-                created += 1
-            except Exception as e:
-                self.log.warning(f"Failed to create dagrun SKIPPING: {e}")
-                continue
-        self.log.info(f"CREATED DAGRUNS: {created}")
-        return created
+    @with_yt_client
+    def _try_claim_dagruns(self, yt_client: yt.YtClient) -> int:
+        try:
+            with yt_client.Transaction(type="tablet"):
+                rows = DagRef.dags_needing_dagruns()
 
-    def _start_queued_dagruns(self) -> None:
-        dag_runs: list[DagRun] = DagRun.get_queued_dag_runs_to_set_running(yt_client=self.yt_client)
-        self._schedule_dag_runs(dag_runs)
+                metas = []
+                runs = []
+                for row in rows:
+                    run_id = yt.common.generate_uuid()
+                    metas.append(DagRef.meta_row_type(id=row["id"], dag_id=row["dag_id"], created_at=row["created_at"], run_id=run_id))
 
-    def _schedule_running_dagruns(self) -> None:
-        dag_runs: list[DagRun] = DagRun.get_running_dag_runs_to_examine(yt_client=self.yt_client)
-        self._schedule_dag_runs(dag_runs)
+                    ref = DagRef.row_type(
+                        dag_id=row["dag_id"],
+                        serialized_dag=row["serialized_dag"],
+                        payload_hash=row["payload_hash"],
+                        load_at=row["load_at"]
+                    )
+                    dag = self._get_dag(ref=ref)
+                    run = DagRun(dag_id=dag.dag_id, state=DagRunState.SCHEDULED, creating_job_id=self._runner.job_id)
+                    runs.append(run)
+
+                yt_client.insert_rows(DagRun.table_path, [asdict(r) for r in runs])
+                yt_client.insert_rows(DagRef.meta_row_type.table_path, [asdict(m) for m in metas], update=True)
+            return len(runs)
+        except Exception as e:
+            self.log.warning("Failed to claim dagruns: %s", e)
+            raise
+
+    def _queue_scheduled_dagruns(self):
+        dag_runs = self.context.pool_executor.submit(DagRun.get_scheduled_dag_runs_to_queue, context=self.client_context, block=False)
+        @dag_runs.on_complete
+        def _():
+            for run in dag_runs.result:
+                dag = self._get_dag(ref=DagRef.get(run.dag_id))
+                if not dag:
+                    self.log.warning(f"Can not find ref to dag or dag of dag_id={dag.dag_id},"
+                                     f" skipping queue dagrun {run.run_id}")
+                    continue
+
+                run.queue_dag_run(dag)
+
+    def _start_queued_dagruns(self):
+        dag_runs = self.context.pool_executor.submit(DagRun.get_queued_dag_runs_to_set_running, context=self.client_context, block=False)
+        @dag_runs.on_complete
+        def _():
+            self._schedule_dag_runs(dag_runs.result)
+
+    def _schedule_running_dagruns(self):
+        dag_runs = self.context.pool_executor.submit(DagRun.get_running_dag_runs_to_examine, context=self.client_context, block=False)
+        @dag_runs.on_complete
+        def _():
+            self._schedule_dag_runs(dag_runs.result)
 
     def _schedule_dag_runs(
-            self,
-            dag_runs: list[DagRun],
+        self,
+        dag_runs: list[DagRun],
     ) -> None:
-        # Переводим SCHEDULE DagRun в RUNNING, SCHEDULED TASKRUN в READY
-        for dag_run in dag_runs:
-            dag = self._get_dag(DagEntity.get(dag_run.dag_id, yt_client=self.yt_client))
+        for run in dag_runs:
+            dag = self._get_dag(DagRef.get(run.dag_id))
             if not dag:
-                self.log.warning(f"Skip dagrun run_id={dag_run.run_id}, dag_id={dag_run.dag_id}")
+                self.log.warning(f"Can not find ref to dag or dag of dag_id={dag.dag_id},"
+                                 f" skipping scheduling dagrun {run.run_id}")
                 continue
 
-            dag_run.dag = dag
-            schedulable_trs = dag_run.update_state(yt_client=self.yt_client) #Пересчитывает статус DagRun,находит задачи, которые нужно поставить в SCHEDULED.
+            schedulable_trs = run.update_state(dag)
 
-            scheduled = dag_run.schedule_trs(schedulable_trs, yt_client=self.yt_client)
-            self.log.info(f"SCHEDULED COUNT: {scheduled} of {len(schedulable_trs)}")
+            scheduled = run.schedule_trs(schedulable_trs)
 
-    def _enqueue_task_runs(self) -> int:
-        trs = TaskRun.get_executable_task_runs_to_queued(yt_client=self.yt_client)
-        self.log.info(f"STARTED QUEUE: {len(trs)} of {len(trs)}")
+            self.log.info(f"SCHEDULED trs COUNT: {scheduled} of {len(schedulable_trs)}, run_id={run.run_id}")
 
-        self._enqueue_task_runs_with_queued_state(trs, self.job.executor)
-        return len(trs)
-
-    def _enqueue_task_runs_with_queued_state(
-            self, task_runs: list[TaskRunRow], executor: Executor
-    ) -> None: # TODO return
-        for tr in task_runs:
-            try:
-                dag = self._get_dag(DagEntity.get(tr.dag_id, yt_client=self.yt_client)) # TODO
-                executor.queue_task_run(tr, dag.task_dict[tr.task_id], self.yt_client)
-            except Exception as e:
-                self.log.exception(f"Failed to enqueue task: {tr.task_id}")
-                continue
+    def _enqueue_task_runs(self):
+        trs = self.context.pool_executor.submit(TaskRun.get_executable_task_runs_to_queue, context=self.client_context, block=False)
+        @trs.on_complete
+        def _():
+            for tr in trs.result:
+                try:
+                    tr_runnable = tr.make_runnable(dag_loader=lambda dag_id: self._get_dag(DagRef.get(dag_id)))
+                    if not tr_runnable:
+                        self.log.warning(
+                            "TaskRun %s is not runnable (state=%s, dag_id=%s)",
+                            tr.task_id, tr.state, tr.dag_id
+                        )
+                        continue
+                    self._executor.queue_task_run(tr_runnable)
+                except Exception as e:
+                    self.log.exception("Failed to enqueue task %s: %s, skipping",tr.task_id, e)
+                    continue

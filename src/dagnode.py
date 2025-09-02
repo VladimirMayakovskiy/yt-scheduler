@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-
-class DAGNode:
-    dag_id: str
+class DagNode:
     id: str
+    dag_id: str
     preceding_task_ids: set[str]
     succeeding_task_ids: set[str]
 
     def __init__(self, id: str, dag_id: str):
         self.id = id
         self.dag_id = dag_id
-        self.succeeding_task_ids = set()
         self.preceding_task_ids = set()
+        self.succeeding_task_ids = set()
 
     @property
     def upstream_task_ids(self) -> list[str]:
@@ -25,13 +24,13 @@ class DAGNode:
     def task_id(self) -> str:
         return self.id
 
-    def set_upstream(self, tasks: DAGNode | list[DAGNode]) -> None:
+    def set_upstream(self, tasks: "DagNode" | list["DagNode"]) -> None:
         self._set_relatives(tasks, upstream=True)
 
-    def set_downstream(self, tasks: DAGNode | list[DAGNode]) -> None:
+    def set_downstream(self, tasks: "DagNode" | list["DagNode"]) -> None:
         self._set_relatives(tasks, upstream=False)
 
-    def _set_relatives(self, tasks: DAGNode | list[DAGNode], upstream: bool = False) -> None:
+    def _set_relatives(self, tasks: "DagNode" | list["DagNode"], upstream: bool = False) -> None:
         if not isinstance(tasks, list):
             tasks = [tasks]
 

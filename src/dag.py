@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import os
-from datetime import datetime
+import typing
 from typing import Any
-
 import yaml
 
-from dag_entity import DagEntity
-from dag_run import DagRun, DagRunRow
-from dag_node import DAGNode
-from ytoperator import make_operator, Operator
-from state import DagRunState
+if typing.TYPE_CHECKING:
+    from dagref import DagRef
 from logging_mixin import LoggingMixin
+from yt_operator import Operator
+from yt_wrapper import with_yt_client, ContextWrapper
 
 import yt.wrapper as yt
 
@@ -22,74 +19,83 @@ class DAG(LoggingMixin):
 
     work_dir: str
 
-    task_dict: dict[str, DAGNode] # task_dict: dict[str, Operator]
+    task_dict: dict[str, Operator]
     upstream: dict[str, list[str]]
     downstream: dict[str, list[str]]
 
-    def __repr__(self):
-        return f"DAG(dag_id={self.dag_id}, work_dir={self.work_dir}, task_dict={self.task_dict}, upstream={self.upstream})"
-
     @classmethod
-    def from_dag_entity(cls, de: DagEntity, yt_client: yt.YtClient):
-        cls.logger.info(f"Creating DAG for dag_entity: {de}")
+    @with_yt_client
+    def from_spec_conf(cls, spec_path: str, work_dir: str, context_wrapper: ContextWrapper, yt_client: yt.YtClient) -> DAG:
+        spec = yaml.safe_load(yt_client.read_file(spec_path))
+
+        context = context_wrapper.bind(work_dir=work_dir)
+
         dag = cls.__new__(cls)
+        dag.dag_id = yt.common.generate_uuid()
+        dag.work_dir = work_dir
+        dag.task_dict = {}
 
-        dag.dag_id = de.dag_id
-        dag.work_dir = de.work_dir
-        dag.task_dict: dict[str, DAGNode] = {}
+        def make_operator(*, task_id: str, _spec: dict):
+            spec_builder_cls = dict({
+                builder_cls().operation_type: builder_cls
+                for builder_cls in yt.spec_builders.SpecBuilder.__subclasses__()
+            }).get(_spec["operation_type"])
 
-        spec = yaml.safe_load(yt_client.read_file(de.spec_path))
+            if spec_builder_cls is None:
+                return None
 
-        outlets_producers: dict[str, list[Operator]] = {} # TODO
-        for task_id, params in spec.get("steps", {}).items():
-            cls.logger.info(f"STEP: {task_id}\nspec: {params}")
+            processed_keys = [
+                "operation_type",
+            ]
+
+            for key in processed_keys:
+                if key in spec:
+                    spec.pop(key)
+
+            spec_builder = spec_builder_cls()
+            spec_builder.spec(_spec)
+
+            return Operator(task_id=task_id, dag_id=dag.dag_id, spec_builder=spec_builder, context=context)
+
+        for task, params in spec.get("steps", {}).items():
             cfg = dict(params)
-            # inlets = cfg.pop('input_table_paths', [])
-            # outlets = cfg.pop('output_table_paths', [])
-            #
-            # abs_inlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in inlets]
-            # abs_outlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in outlets]
-            #
-            # cfg['input_table_paths'] = abs_inlets
-            # cfg['output_table_paths'] = abs_outlets
-
-            operator = make_operator(task_id=task_id, dag_id=dag.dag_id, spec=cfg, yt_client=yt_client, work_dir=dag.work_dir)
+            operator = make_operator(task_id=task, _spec=cfg)
             if operator is None:
                 raise ValueError(f"Unknown operator type: {cfg.get('operation_type', '')}")
-            operator_cls = operator.__class__
-            # operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg, workdir=dag.work_dir) # TODO
-            dag.task_dict[task_id] = operator
+            operator.prepare_user_spec()
+            dag.task_dict[task] = operator
 
-            cls.logger.info(f"OPERATOR: {operator_cls}")
-            for outlet in operator.get_output_table_paths():
-                outlets_producers.setdefault(outlet, []).append(operator)
+        DAG.resolve_tasks_dependencies(dag)
+        return dag
 
-        #TODO upstreams, downstreams
-        for tid, op in dag.task_dict.items():
-            for inlet in op.get_input_table_paths(): # [tid]:
-                if producers := outlets_producers.get(inlet):
-                    op.set_upstream(producers)
-
-        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.task_dict.items()}
-        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.task_dict.items()}
-        cls.logger.info(f"CREATED DAG: {dag}")
+    @classmethod
+    @with_yt_client
+    def from_serialized_dag(cls, ref: "DagRef.row_type", context_wrapper: ContextWrapper, yt_client: yt.YtClient):
+        cls.logger.info(f"Creating DAG for dag_entity: {ref}, prefix: {yt.ypath.get_config(yt_client)['prefix']}")
+        from serialized import SerializedDag
+        dag = SerializedDag.deserialize_dag(
+            encoded_dag=SerializedDag.from_json(ref.serialized_dag),
+            dag_id=ref.dag_id,
+            context_wrapper=context_wrapper)
+        DAG.resolve_tasks_dependencies(dag)
         return dag
 
     @staticmethod
-    def create_dagrun(
-            *,
-            yt_client: yt.YtClient,
-            dag: DAG,
-            state: DagRunState,
-            creating_job_id: str | None = None,
-    ) -> DagRun:
-        run = DagRun(dag_id=dag.dag_id, state=state, dag=dag, creating_job_id=creating_job_id)
-        DAG.logger.info(f"CREATED DAGRUN for dag={dag.dag_id}: {run}")
-        run.dag_run_prepare_for_execution(yt_client)
-        return run
+    def resolve_tasks_dependencies(dag: DAG):
+        outlets_producers: dict[str, list[Operator]] = {}
+        for operator in dag.tasks:
+            for outlet in operator.get_output_table_paths():
+                outlets_producers.setdefault(outlet, []).append(operator)
+        for operator in dag.tasks:
+            for inlet in operator.get_input_table_paths():
+                if producers := outlets_producers.get(inlet):
+                    operator.set_upstream(producers)
+
+        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.task_dict.items()}
+        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.task_dict.items()}
 
     @property
-    def tasks(self) -> list[DAGNode]:
+    def tasks(self) -> list[Operator]:
         return list(self.task_dict.values())
 
     @property
@@ -97,9 +103,9 @@ class DAG(LoggingMixin):
         return list(self.task_dict.keys())
 
     @property
-    def roots(self) -> list[DAGNode]: #TODO
+    def roots(self) -> list[Operator]:
         return [self.task_dict.get(tid, None) for tid, ups in self.upstream.items() if not ups]
 
     @property
-    def leaves(self) -> list[DAGNode]:
+    def leaves(self) -> list[Operator]:
         return [self.task_dict.get(tid, None) for tid, downs in self.downstream.items() if not downs]

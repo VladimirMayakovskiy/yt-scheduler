@@ -9,6 +9,7 @@ class JobState(str, Enum):
         return self.value
 
 class DagRunState(str, Enum):
+    SCHEDULED = "scheduled"
     QUEUED = "queued" # шедулер начал обрабатывать dagrun: хотя бы одна задача dagrun SCHEDULED, но ни одной в READY
     RUNNING = "running"
     SUCCESS = "success"
