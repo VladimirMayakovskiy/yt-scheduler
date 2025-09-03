@@ -42,6 +42,7 @@ class DagRun(DagRunRow, LoggingMixin):
             self,
             row: DagRun.row_type | None = None,
             *,
+            run_id: str | None = None,
             dag_id: str | None = None,
             state: DagRun.state_type | None = None,
             start_date: datetime | str | None = None,
@@ -57,7 +58,8 @@ class DagRun(DagRunRow, LoggingMixin):
                 start_date=(start_date.isoformat() if isinstance(start_date, datetime) else start_date) or datetime.utcnow().isoformat(),
                 end_date=end_date.isoformat() if isinstance(end_date, datetime) else end_date,
             )
-
+        if run_id is not None:
+            self.run_id = run_id
         self.creating_job_id = creating_job_id
 
 
@@ -165,7 +167,7 @@ class DagRun(DagRunRow, LoggingMixin):
             return 0
 
     @with_yt_client
-    def set_state(self, state: DagRun.state_type, yt_client: yt.YtClient) -> None: # todo
+    def set_state(self, state: DagRun.state_type, yt_client: yt.YtClient) -> DagRun: # todo
         self.log.info(f"UPDATE state of run_id={self.run_id} FROM {self.state} TO {state}")
         if self.state != state:
             if state in [DagRun.state_type.SCHEDULED, DagRun.state_type.QUEUED, DagRun.state_type.RUNNING]:
@@ -189,6 +191,7 @@ class DagRun(DagRunRow, LoggingMixin):
             except Exception as e:
                 self.log.exception("Failed update state for run_id=%s: %s", self.run_id, e)
                 raise
+        return self
 
     @staticmethod
     def fetch_task_runs(
@@ -252,4 +255,29 @@ class DagRun(DagRunRow, LoggingMixin):
             yt_client.insert_rows(TaskRun.table_path, [asdict(task) for task in tasks])
         except Exception as e:
             self.log.exception(f"Failed to create trs for run %s: %s", self.run_id, e)
+            raise
+
+    @staticmethod
+    def fetch_dag_runs(
+        run_id: str | None = None,
+        dag_id: str | None = None
+    )  -> list[DagRun] :
+        conditions: list[str] = []
+        if run_id is not None:
+            conditions.append(f"tr.run_id = '{run_id}'")
+        if dag_id is not None:
+            conditions.append(f"tr.dag_id = '{dag_id}'")
+
+        where_clause = ""
+        if conditions:
+            where_clause = "where " + " and ".join(conditions)
+        try:
+            rows = _fetch_rows(cls=DagRun, rows=f"""
+                {get_all_row_fields(DagRun, "tr")}
+                FROM [{DagRun.table_path}] AS tr
+                {where_clause}
+                """
+            )
+            return [DagRun(DagRun.row_type(**row)) for row in rows]
+        except Exception:
             raise

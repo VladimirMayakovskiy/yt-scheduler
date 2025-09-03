@@ -1,16 +1,15 @@
 from __future__ import annotations
+import yaml
 
 from dag import DAG
 from dagref import DagRef
 from job import RunnerEnv
-
-from yt.wrapper.schema import TableSchema, SortColumn
-import yt.wrapper as yt
-
+from base import BaseRow
 from runtime import build_runtime
 from yt_wrapper import ClientContext, context_wrapper
 
-from base import BaseRow
+from yt.wrapper.schema import TableSchema, SortColumn
+import yt.wrapper as yt
 
 def import_all_dataclasses():
     from dagrun import DagRunRow
@@ -45,16 +44,29 @@ def run_scheduler(config):
     finally:
         runtime.shutdown()
 
-def add_dag(*, config, spec: str = None, work_dir: str = None):
+def add_dag(*, config, spec: str | dict, work_dir: str = None):
     env = RunnerEnv(job_id=add_dag.__name__, context=ClientContext(config=config))
     yt_client = env.dag_context.create_client()
 
-    if not yt_client.exists(work_dir):
-        yt_client.create("map_node", work_dir, force=True)
+    try:
+        if isinstance(spec, str):
+            spec_path = spec
+            with open(spec_path, "rb") as f:
+                spec_conf = yaml.safe_load(f)
+        elif isinstance(spec, dict):
+            spec_conf = spec
+        else:
+            raise ValueError(f"Invalid spec type: {type(spec)}")
 
-    cypress_spec_path = f"{work_dir}/spec.yaml"
-    yt_client.smart_upload_file(filename=spec, destination=cypress_spec_path, placement_strategy="replace")
+        if not yt_client.exists(work_dir):
+            yt_client.create("map_node", work_dir, force=True)
 
-    dag = DAG.from_spec_conf(spec_path=cypress_spec_path, work_dir=work_dir, context_wrapper=context_wrapper(env.dag_context, env=env), yt_client=yt_client)
+        cypress_spec_path = f"{work_dir}/spec.yaml"
+        yt_client.write_file(cypress_spec_path, yaml.safe_dump(spec_conf).encode("utf-8"))
+    except Exception as e:
+        print(f"Failed to load spec: {e}")
+        raise
+
+    dag = DAG.from_spec_conf(spec=spec_conf, work_dir=work_dir, context_wrapper=context_wrapper(env.dag_context, env=env))
 
     return DagRef.try_add_dag(dag=dag, yt_client=yt_client)

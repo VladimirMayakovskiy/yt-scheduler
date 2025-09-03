@@ -61,7 +61,7 @@ class DagRef(DagRefRow):
                 allow_join_without_index=True
             ))
         except Exception as e:
-            print("Failed to select rows:")
+            print("Failed to select rows: %s", e)
             return []
         return rows
 
@@ -69,34 +69,47 @@ class DagRef(DagRefRow):
     def get_serialized_dag(dag: DAG):
         serialized_dag = SerializedDag.to_json(SerializedDag.serialize_dag(dag))
         payload_hash = hashlib.sha256(serialized_dag.encode("utf-8")).hexdigest()
-        return DagRef(serialized_dag=serialized_dag, payload_hash=payload_hash, load_at=datetime.utcnow().isoformat(),
-                           dag_id=dag.dag_id)
+        return DagRef.row_type(
+            serialized_dag=serialized_dag,
+            payload_hash=payload_hash,
+            load_at=datetime.utcnow().isoformat(),
+            dag_id=dag.dag_id)
 
     @staticmethod
-    def try_add_dag(dag: DAG, yt_client: yt.YtClient) -> (bool, str):
-        row = DagRef.get_serialized_dag(dag)
+    def _check_dag_exists_by_spec(payload_hash: str, yt_client: yt.YtClient) -> str | None:
         try:
             found = list(yt_client.select_rows(
                 f"""
                 d.payload_hash AS payload_hash,
                 d.dag_id AS dag_id
                 FROM [{DagRef.table_path}] AS d
-                WHERE d.payload_hash = "{row.payload_hash}"
+                WHERE d.payload_hash = "{payload_hash}"
                 LIMIT 1
                 """
             ))
         except Exception:
             raise
-
         if not found:
+            return None
+        return found[0].get("dag_id")
+
+    @staticmethod
+    def try_add_dag(dag: DAG, yt_client: yt.YtClient) -> (bool, str, str):
+        row = DagRef.get_serialized_dag(dag)
+        try:
+            dag_id = DagRef._check_dag_exists_by_spec(row.payload_hash, yt_client)
+        except Exception:
+            raise
+
+        if not dag_id:
             yt_client.insert_rows(DagRef.table_path, [asdict(row)])
             dag_id, ret = row.dag_id, True
         else:
-            dag_id, ret = found[0].get("dag_id"), False
+            ret = False
 
         meta_row = DagRef.meta_row_type(dag_id=dag_id, created_at=datetime.utcnow().isoformat())
         yt_client.insert_rows(DagRef.meta_row_type.table_path, [asdict(meta_row)])
-        return ret, dag_id
+        return ret, dag_id, meta_row.id
 
     @classmethod
     @with_yt_client
@@ -114,7 +127,27 @@ class DagRef(DagRefRow):
             # cls.logger.exception("Failed to select rows:")
             raise
         if not rows:
-            print(f"Can not find DagEntity with dag_id={dag_id}")
+            print(f"Can not find Dag with dag_id={dag_id}")
             return None
         print(f"Get rows: {rows}")
         return cls(**rows[0])
+
+    @staticmethod
+    @with_yt_client
+    def get_meta(dag_id: str, yt_client: yt.YtClient) -> list[DagRef.meta_row_type]:
+        try:
+            rows = list(yt_client.select_rows(
+                f"""
+                {get_all_row_fields(DagMetaRow, alias="meta")}
+                from [{DagRef.meta_row_type.table_path}] as meta
+                where meta.dag_id = "{dag_id}"
+                """
+            ))
+        except Exception as e:
+            # cls.logger.exception("Failed to select rows:")
+            raise
+        if not rows:
+            print(f"Can not find meta of dag with dag_id={dag_id}")
+            return []
+        print(f"Get rows: {rows}")
+        return [DagRef.meta_row_type(**row) for row in rows]

@@ -24,10 +24,8 @@ class DAG(LoggingMixin):
     downstream: dict[str, list[str]]
 
     @classmethod
-    @with_yt_client
-    def from_spec_conf(cls, spec_path: str, work_dir: str, context_wrapper: ContextWrapper, yt_client: yt.YtClient) -> DAG:
-        spec = yaml.safe_load(yt_client.read_file(spec_path))
-
+    def from_spec_conf(cls, spec: dict, work_dir: str, context_wrapper: ContextWrapper) -> DAG:
+        # spec = yaml.safe_load(yt_client.read_file(spec_path))
         context = context_wrapper.bind(work_dir=work_dir)
 
         dag = cls.__new__(cls)

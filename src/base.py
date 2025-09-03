@@ -13,9 +13,10 @@ class BaseRow:
     unique_keys: ClassVar[bool] = True
 
 def get_all_row_fields(cls: type[dataclass], alias: str) -> str:
+    row_type = cls.row_type if hasattr(cls, "row_type") else cls
     return ",\n".join(
         f"{alias}.{f.name} AS {f.name}"
-        for f in dataclasses.fields(cls.row_type) if f.init
+        for f in dataclasses.fields(row_type) if f.init
     )
 
 @with_yt_client

@@ -112,7 +112,8 @@ class Scheduler(JobBase):
                         load_at=row["load_at"]
                     )
                     dag = self._get_dag(ref=ref)
-                    run = DagRun(dag_id=dag.dag_id, state=DagRunState.SCHEDULED, creating_job_id=self._runner.job_id)
+
+                    run = DagRun(run_id=run_id, dag_id=dag.dag_id, creating_job_id=self._runner.job_id).set_state(state=DagRunState.SCHEDULED)
                     runs.append(run)
 
                 yt_client.insert_rows(DagRun.table_path, [asdict(r) for r in runs])
