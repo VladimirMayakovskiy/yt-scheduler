@@ -1,7 +1,9 @@
 from copy import deepcopy
 from typing import TypedDict, Optional
 
-import yt.wrapper as yt
+from yt.wrapper.common import update, update_inplace
+import yt.wrapper.default_config as yt_default_config
+from yt.wrapper.mappings import VerifiedDict
 
 class DefaultConfigType(TypedDict, total=False):
     class DefaultConfigProxyType(TypedDict, total=False):
@@ -16,52 +18,36 @@ default_config = {
     "proxy": {
         "url": None,
     },
-    "config_path": None,
-    "default_work_dir": None,
+    "default_work_dir": "//tmp/",
 }
 
-def get_default_config() -> DefaultConfigType:
-    template_dict = deepcopy(default_config)
-    config = yt.default_config.VerifiedDict(
+def get_default_config() -> VerifiedDict:
+    default_template = deepcopy(yt_default_config.get_default_config())
+    patch_template = deepcopy(default_config)
+    template_dict = yt_default_config.VerifiedDict({**default_template, **patch_template})
+    yt_default_config.update_config_from_env(template_dict)
+    config = yt_default_config.VerifiedDict(
         template_dict=template_dict,
-        transform_func=yt.default_config.transform_value)
-    return config
-
-ENV_VARS_SHORTCUTS = {
-    "YT_PROXY": "proxy/url",
-}
-
-def _update_from_env_vars(
-    config: yt.default_config.VerifiedDict,
-    shortcuts: Optional[dict] = None,
-):
-    if shortcuts is None:
-        shortcuts = ENV_VARS_SHORTCUTS
-
-    def _set(d, key, value):
-        parts = key.split("/")
-        for k in parts[:-1]:
-            d = d[k]
-        d[parts[-1]] = value
-
-    import os
-    for key, path in shortcuts.items():
-        if value := os.getenv(key):
-            _set(config, path, value)
-
+        transform_func=yt_default_config.transform_value)
     return config
 
 class Config:
     def __init__(self):
         self.config = None
-        self._reload()
-        # todo version
+        self.default_config_module = yt_default_config
+        self._init_from_env()
 
-    def _reload(self):
-        if self.config is None:
-            self.config = _update_from_env_vars(get_default_config())
+    def _init_from_env(self):
+        if self.config is not None:
+            self.default_config_module.update_config_from_env(self.config)
         else:
-            self.config = _update_from_env_vars(self.config)
+            self.config = self.default_config_module.update_config_from_env(get_default_config())
+
+    def update_config(self, patch):
+        update_inplace(self.config, patch)
+
+    def get_config(self):
+        return self.config
 
     def get_proxy(self):
         return self._get("proxy/url")
@@ -71,7 +57,7 @@ class Config:
 
     def __getattr__(self, key):
         try:
-            d = self._get(key)
+            return self._get(key)
         except KeyError:
             raise AttributeError(f"Config has no attribute {key}")
 

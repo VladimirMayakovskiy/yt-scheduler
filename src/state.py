@@ -1,5 +1,7 @@
 from enum import Enum
 
+from common import classproperty
+
 class JobState(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
@@ -24,6 +26,14 @@ class TaskRunState(str, Enum):
     RUNNING = "running" # задача активно выполняется
     SUCCESS = "success" # задача успешно завершилась
     FAILED = "failed"
+    # todo add skipped
+
+    @classproperty
+    def unfinished_states(self) -> list["TaskRunState"]:
+        return [TaskRunState.SCHEDULED, TaskRunState.QUEUED, TaskRunState.RUNNING]
+    @classproperty
+    def finished_states(self) -> list["TaskRunState"]:
+        return [TaskRunState.FAILED, TaskRunState.SUCCESS]
 
     def __str__(self) -> str:
         return self.value

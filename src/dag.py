@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import typing
+import hashlib
 from typing import Any
-import yaml
 
-if typing.TYPE_CHECKING:
-    from dagref import DagRef
+from task import Task
+from dagref import DagRef
 from logging_mixin import LoggingMixin
-from yt_operator import Operator
-from yt_wrapper import with_yt_client, ContextWrapper
-
-import yt.wrapper as yt
+from yt_wrapper import context_wrapper
 
 class DAG(LoggingMixin):
     dag_id: str
@@ -19,81 +15,84 @@ class DAG(LoggingMixin):
 
     work_dir: str
 
-    task_dict: dict[str, Operator]
-    upstream: dict[str, list[str]]
-    downstream: dict[str, list[str]]
+    task_dict: dict[str, Task]
 
     @classmethod
-    def from_spec_conf(cls, spec: dict, work_dir: str, context_wrapper: ContextWrapper) -> DAG:
-        # spec = yaml.safe_load(yt_client.read_file(spec_path))
-        context = context_wrapper.bind(work_dir=work_dir)
+    def try_add_dag(cls, spec: dict, work_dir: str) -> (bool, str, str) | None:
+        try:
+            dag = DAG.from_spec_conf(spec=spec, work_dir=work_dir)
+        except Exception as e:
+            cls.logger.error("Failed to create DAG from spec %s: %s", spec, e)
+            return None
+        return DagRef.try_add_dag(dag)
+
+
+    @classmethod
+    def from_spec_conf(cls, spec: dict, work_dir: str) -> DAG:
+        context = context_wrapper(prefix=work_dir)
+
+        task_dict: dict[str, Task] = {}
+        for task_id, params in spec.get("steps", {}).items():
+            cfg = dict(params)
+
+            task = Task.from_spec_conf(cfg, task_id)
+
+            if task is None:
+                cls.logger.exception("Cannot build task from spec: %s", cfg) # todo как минимум сразу удалять граф, как максимум ставить состояние задачи skipping, и если от нее не зависят другие - то ок
+                raise ValueError("Task not created %s for %s", task_id, cfg)
+
+            task._context = context
+            task.prepare_user_spec()
+            task_dict[task_id] = task
 
         dag = cls.__new__(cls)
-        dag.dag_id = yt.common.generate_uuid()
+        dag.dag_id = None
         dag.work_dir = work_dir
-        dag.task_dict = {}
-
-        def make_operator(*, task_id: str, _spec: dict):
-            spec_builder_cls = dict({
-                builder_cls().operation_type: builder_cls
-                for builder_cls in yt.spec_builders.SpecBuilder.__subclasses__()
-            }).get(_spec["operation_type"])
-
-            if spec_builder_cls is None:
-                return None
-
-            processed_keys = [
-                "operation_type",
-            ]
-
-            for key in processed_keys:
-                if key in spec:
-                    spec.pop(key)
-
-            spec_builder = spec_builder_cls()
-            spec_builder.spec(_spec)
-
-            return Operator(task_id=task_id, dag_id=dag.dag_id, spec_builder=spec_builder, context=context)
-
-        for task, params in spec.get("steps", {}).items():
-            cfg = dict(params)
-            operator = make_operator(task_id=task, _spec=cfg)
-            if operator is None:
-                raise ValueError(f"Unknown operator type: {cfg.get('operation_type', '')}")
-            operator.prepare_user_spec()
-            dag.task_dict[task] = operator
-
-        DAG.resolve_tasks_dependencies(dag)
+        dag.task_dict = task_dict
+        dag.resolve_tasks_dependencies()
         return dag
+
+    def resolve_tasks_dependencies(self):
+        from dagnode import Dependency
+        dependency_rules: list[Dependency] = []
+        for task in self.tasks:
+            dependency_rules.extend(getattr(task.__class__, "dependency_rules", []))
+
+        for dep_rule in dependency_rules:
+            producers_map: dict[str, list[Task]] = {}
+
+            for task in self.tasks:
+                for dep_key in dep_rule.downstream_deps(task):
+                    producers_map.setdefault(dep_key, []).append(task)
+
+            for task in self.tasks:
+                for dep_key in dep_rule.upstream_deps(task):
+                    if producers := producers_map.get(dep_key):
+                        task.set_upstream(producers)
 
     @classmethod
-    @with_yt_client
-    def from_serialized_dag(cls, ref: "DagRef.row_type", context_wrapper: ContextWrapper, yt_client: yt.YtClient):
-        cls.logger.info(f"Creating DAG for dag_entity: {ref}, prefix: {yt.ypath.get_config(yt_client)['prefix']}")
+    def from_serialized_repr(cls, ref: "DagRef.row_type"):
         from serialized import SerializedDag
         dag = SerializedDag.deserialize_dag(
-            encoded_dag=SerializedDag.from_json(ref.serialized_dag),
-            dag_id=ref.dag_id,
-            context_wrapper=context_wrapper)
-        DAG.resolve_tasks_dependencies(dag)
+            encoded_dag=SerializedDag.from_json(ref.serialized_repr),
+            dag_id=ref.dag_id)
+
+        context = context_wrapper(prefix=dag.work_dir)
+        for task in dag.task_dict.values():
+            task._context = context
+            task.prepare_user_spec()
+
+        dag.resolve_tasks_dependencies()
         return dag
 
-    @staticmethod
-    def resolve_tasks_dependencies(dag: DAG):
-        outlets_producers: dict[str, list[Operator]] = {}
-        for operator in dag.tasks:
-            for outlet in operator.get_output_table_paths():
-                outlets_producers.setdefault(outlet, []).append(operator)
-        for operator in dag.tasks:
-            for inlet in operator.get_input_table_paths():
-                if producers := outlets_producers.get(inlet):
-                    operator.set_upstream(producers)
-
-        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.task_dict.items()}
-        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.task_dict.items()}
+    def to_serialized_repr(self) -> tuple[str, str]:
+        from serialized import SerializedDag
+        serialized = SerializedDag.to_json(SerializedDag.serialize_dag(self))
+        payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return serialized, payload_hash
 
     @property
-    def tasks(self) -> list[Operator]:
+    def tasks(self) -> list[Task]:
         return list(self.task_dict.values())
 
     @property
@@ -101,9 +100,9 @@ class DAG(LoggingMixin):
         return list(self.task_dict.keys())
 
     @property
-    def roots(self) -> list[Operator]:
-        return [self.task_dict.get(tid, None) for tid, ups in self.upstream.items() if not ups]
+    def roots(self) -> list[Task]:
+        return [self.task_dict.get(t.task_id, None) for t in self.tasks if not t.upstream_task_ids]
 
     @property
-    def leaves(self) -> list[Operator]:
-        return [self.task_dict.get(tid, None) for tid, downs in self.downstream.items() if not downs]
+    def leaves(self) -> list[Task]:
+        return [self.task_dict.get(t.task_id, None) for t in self.tasks if not t.downstream_task_ids]

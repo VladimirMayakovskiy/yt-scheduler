@@ -1,48 +1,40 @@
 from __future__ import annotations
 
-import uuid
-from dataclasses import field, asdict
+from dataclasses import field, asdict, KW_ONLY
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional, ClassVar, Any, Callable
+from types import SimpleNamespace
+from typing import Optional, ClassVar
 
-if TYPE_CHECKING:
-    from dag import DAG
-
-from base import BaseRow, get_all_row_fields
+from rows_helpers import make_formatted_select
+from base_row import YtRow, TablePath
 from state import TaskRunState
 from logging_mixin import LoggingMixin
-from yt_operator import Operator
+from task import Task
 from yt_wrapper import with_yt_client
+
 import yt.wrapper as yt
 
 @yt.yt_dataclass
-class TaskRunRow(BaseRow):
-    table_path:  ClassVar[str] = "//tmp/task_run"
-    key_columns: ClassVar[list[str]] = ["id"]
+class TaskRunRow(YtRow):
+    table_path:  ClassVar[str] = TablePath("task_run")
+    key_columns: ClassVar[list[str]] = ["run_id"]
+    alias: ClassVar[str] = "taskrun"
+
+    run_id: str = field(default_factory=lambda: yt.common.generate_uuid())
+
+    _: KW_ONLY
 
     task_id: str
-    run_id: str
     dag_id: str
+    dag_run_id: str
+    state: str
 
-    state: str # TaskRunState
+    operation_id: Optional[str] = None
 
     scheduled_at: Optional[str] = None
     queued_at: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-
-    operation_id: Optional[str] = None
-
-    id: str = field(default_factory=lambda: uuid.uuid4().hex)
-
-    def make_runnable(self, dag_loader: Callable[[str], "DAG"]) -> Optional[TaskRunnable]:
-        try:
-            dag = dag_loader(self.dag_id)
-        except Exception as e:
-            return None
-        operator: Operator = dag.task_dict[self.task_id]
-        return TaskRunnable(task_run=self, execute_callable=operator.run_operation)
-
 
 class TaskRun(TaskRunRow, LoggingMixin):
     row_type: ClassVar[type[TaskRunRow]] = TaskRunRow
@@ -52,8 +44,8 @@ class TaskRun(TaskRunRow, LoggingMixin):
         self,
         row: TaskRun.row_type | None = None,
         *,
-        run_id: str | None = None,
-        operator: Operator | None = None,
+        dag_run_id: str | None = None,
+        operator: Task | None = None,
         state: TaskRun.state_type | None = None,
         queued_at: str | None = None,
         start_date: str | None = None,
@@ -67,7 +59,7 @@ class TaskRun(TaskRunRow, LoggingMixin):
             scheduled_at = scheduled_at or datetime.utcnow().isoformat()
 
             super().__init__(
-                run_id=run_id,
+                dag_run_id=dag_run_id,
                 task_id=operator.task_id,
                 dag_id=operator.dag_id,
                 state=state,
@@ -78,92 +70,123 @@ class TaskRun(TaskRunRow, LoggingMixin):
             )
 
     @classmethod
-    @with_yt_client
-    def get_executable_task_runs_to_queue(cls, yt_client: yt.YtClient) -> list["TaskRun"]:
+    def fetch_rows(
+        cls,
+        run_id: str | list[str] | tuple[str] = None,
+        task_id: str | list[str] | tuple[str] = None,
+        dag_id: str | list[str] | tuple[str] = None,
+        dag_run_id: str | list[str] | tuple[str] = None,
+        state: TaskRun.state_type | list[TaskRun.state_type] | tuple[TaskRun.state_type] = None,
+        operation_id: str | list[str] | tuple[str] = None,
+        limit: int = None,
+    ) -> list[TaskRun]:
+        rows = make_formatted_select(
+            cls=cls,
+            run_id=run_id,
+            task_id=task_id,
+            dag_id=dag_id,
+            dag_run_id=dag_run_id,
+            state=state,
+            operation_id=operation_id,
+            limit=limit,
+        )
+        return [cls(cls.row_type(**row)) for row in rows]
+
+    @classmethod
+    def get(
+        cls,
+        run_id: str = None,
+        task_id: str = None,
+        dag_id: str = None,
+        dag_run_id: str = None,
+        operation_id: str = None
+    ) -> "TaskRun" | None:
+        return YtRow.get(cls=cls, run_id=run_id, task_id=task_id, dag_id=dag_id,
+                         dag_run_id=dag_run_id, operation_id=operation_id)
+
+
+    def as_operator(self):
+        from dagref import TaskRef
         try:
-            if yt_client.exists(TaskRun.table_path):
-                rows = list(yt_client.select_rows(
-                    f"""
-                    {get_all_row_fields(cls, "tr")}
-                    FROM [{cls.table_path}] AS tr
-                    WHERE tr.state = '{cls.state_type.QUEUED}'
-                    LIMIT 1
-                    """
-                ))
-            else: # todo limit
-                rows = []
-            cls.logger.info(f"READY TASKRUNS TO QUEUE: {rows}")
-            return [cls(cls.row_type(**row)) for row in rows]
+            ref = TaskRef.get(dag_id=self.dag_id, task_id=self.task_id)
+            task: Task = Task.from_serialized_repr(ref=ref)
+
+            return SimpleNamespace(run_operation=lambda: task.run_operation(mutation_id=self.run_id), row=self)
+        except yt.YtError as e:
+            raise e
         except Exception as e:
-            cls.logger.exception("Failed to select_rows SKIPPING:")
-            return []
+            TaskRun.logger.warning(
+                "TaskRun %s is not runnable (state=%s, dag_id=%s): %s",
+                self.run_id, self.state, self.dag_id, e
+            )
+            return None
 
     @classmethod
     @with_yt_client
-    def get_running_task_runs_to_poll(cls, yt_client: yt.YtClient) -> list["TaskRun"]:
-        try:
-            if yt_client.exists(TaskRun.table_path):
-                rows = list(yt_client.select_rows(
-                    f"""
-                    {get_all_row_fields(cls, "tr")}
-                    FROM [{cls.table_path}] AS tr
-                    WHERE tr.state = '{cls.state_type.RUNNING}'
-                    """
-                ))
-            else:
-                rows = []
-            cls.logger.info(f"READY TASKRUNS TO QUEUE: {rows}")
-            return [cls(cls.row_type(**row)) for row in rows]
-        except Exception as e:
-            cls.logger.exception("Failed to select_rows SKIPPING:")
-            return []
+    def get_executable_task_runs_to_queue(cls) -> list["TaskRun"]:
+        return cls.fetch_rows(state=cls.state_type.QUEUED)
+
+    @classmethod
+    @with_yt_client
+    def get_running_task_runs_to_poll(cls) -> list["TaskRun"]:
+        res = cls.fetch_rows(state=cls.state_type.RUNNING)
+        return res
 
     @with_yt_client
-    def update_row(self, state: TaskRun.state_type | None = None, operation_id: str | None = None) -> TaskRun.row_type:
-        if state is not None:
-            if self.state != state:
-                if state in [self.state_type.SCHEDULED, self.state_type.QUEUED, self.state_type.RUNNING]:
-                    if self.state in [self.state_type.SUCCESS, self.state_type.FAILED]:
-                        self.scheduled_at, self.queued_at, self.start_date, self.end_date = None, None, None, None
+    def _update_row(
+        self,
+        yt_client: yt.YtClient,
+        state: TaskRun.state_type | None = None,
+        operation_id: str | None = None,
+    ) -> TaskRun.row_type:
+        def _build_row() -> TaskRun.row_type:
+            base = TaskRun.row_type(**asdict(self))
+            now = datetime.utcnow().isoformat() # todo
+            if state is not None and base.state != state:
+                if state in TaskRun.state_type.unfinished_states:
+                    base.scheduled_at = base.scheduled_at or now
+                    if state == TaskRun.state_type.SCHEDULED:
+                        base.queued_at = None
+                        base.start_date = None
+                    else:
+                        base.queued_at = base.queued_at or now
+                        if state == TaskRun.state_type.RUNNING:
+                            base.start_date = now # TODO get from op
+                        else:
+                            base.start_date = None
+                    base.end_date = None
+                elif base.state in TaskRun.state_type.unfinished_states:
+                    base.end_date = now
+                base.state = state
 
-                    if state == self.state_type.RUNNING:
-                        self.start_date = datetime.utcnow().isoformat() # TODO get from op
+            if operation_id is not None:
+                base.operation_id = operation_id
+            return base
 
-                    if self.state in [self.state_type.RUNNING, self.state_type.QUEUED]:
-                        self.queued_at = self.queued_at or datetime.utcnow().isoformat()
+        row_obj = _build_row()
+        try:
+            self.log.info(f"Updating task run id={self.run_id} with state={row_obj.state}")
+            yt_client.insert_rows(TaskRun.table_path, [asdict(row_obj)]) # change we have create_rows method
+        except Exception as e:
+            TaskRun.logger.exception("Failed update state for task run id=%s: %s", self.run_id, e)
+            raise
 
-                    self.scheduled_at = self.scheduled_at or datetime.utcnow().isoformat()
-                    self.end_date = None
-                elif state in [self.state_type.SUCCESS, self.state_type.FAILED] and self.state in [self.state_type.SCHEDULED, self.state_type.QUEUED, self.state_type.RUNNING]:
-                    self.end_date = datetime.utcnow().isoformat()
-
-                self.state = state
-        if operation_id is not None:
-            self.operation_id = operation_id
+        self.state = row_obj.state
+        self.scheduled_at = row_obj.scheduled_at
+        self.queued_at = row_obj.queued_at
+        self.start_date = row_obj.start_date
+        self.end_date = row_obj.end_date
+        self.operation_id = row_obj.operation_id
         return self
 
     @staticmethod
-    @with_yt_client
-    def update_rows(
-            trs : TaskRun.row_type | list[TaskRun.row_type],
-            yt_client: yt.YtClient,
-    ) -> list[TaskRun.row_type]:
-        if not isinstance(trs, list):
-            trs = [trs]
-        yt_client.insert_rows(TaskRun.table_path, [asdict(row) for row in trs])
-        return trs
-
-class TaskRunnable:
-    def __init__(self, task_run: TaskRun.row_type, execute_callable: Callable[[], Any]):
-        self._task_run = task_run
-        self._execute_callable = execute_callable
-
-    def __call__(self):
-        return self._execute_callable()
-
-    def __getattr__(self, attr):
-        return getattr(self._task_run, attr)
-
-    @property
-    def row(self):
-        return self._task_run
+    def update_row(
+        row: TaskRun | TaskRun.row_type | str,
+        state: TaskRun.state_type | None = None,
+        operation_id: str | None = None
+    ) -> TaskRun.row_type:
+        if isinstance(row, str):
+           row = TaskRun.get(run_id=row)
+        if isinstance(row, TaskRun.row_type):
+            row = TaskRun(row=row)
+        return row._update_row(state=state, operation_id=operation_id)

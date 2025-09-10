@@ -11,46 +11,46 @@ import yt.wrapper as yt
 from config import Config
 
 if typing.TYPE_CHECKING:
-    from job import RunnerEnv
+    from job import ClientState
 
-_current_job: contextvars.ContextVar["RunnerEnv"] = contextvars.ContextVar("_current_job")
+_current_context: contextvars.ContextVar["ClientState"] = contextvars.ContextVar("_current_context")
 
-def get_current_job() -> Optional["RunnerEnv"]: # todo check type
+def get_current_context() -> Optional["ClientState"]:
     try:
-        return _current_job.get()
+        return _current_context.get()
     except LookupError:
         return None
 
 @lru_cache(maxsize=128)
-def _create_client_cached(proxy: Optional[str], work_dir: Optional[str], thread_id: int) -> yt.YtClient:
+def _create_client_cached(proxy: Optional[str], prefix: Optional[str], thread_id: int) -> yt.YtClient:
     kwargs = {}
     if proxy:
         kwargs["proxy"] = proxy
     client = yt.YtClient(**kwargs)
-    if work_dir:
-        prefix = yt.ypath.YPath(work_dir.rstrip("/") + "/") # todo create prefix from work_dir func
+    if prefix:
+        prefix = yt.ypath.YPath(prefix.rstrip("/") + "/")
         yt.ypath.get_config(client)["prefix"] = prefix
     return client
 
 class _ClientContextManager:
-    def __init__(self, env: "RunnerEnv", client):
-        self.env = env
+    def __init__(self, ctx: "ClientState", client: yt.YtClient):
+        self.ctx = ctx
         self.client = client
-        self._job_var_token = None
+        self._ctx_var_token = None
         self._client_var_token = None
         self._client_set = False
 
     def _enter(self):
-        self._job_var_token = _current_job.set(self.env)
-        if self.env.client_var.get(None) != self.client:
-            self._client_var_token = self.env.client_var.set(self.client)
+        self._ctx_var_token = _current_context.set(self.ctx)
+        if self.ctx.client_var.get(None) != self.client:
+            self._client_var_token = self.ctx.client_var.set(self.client)
             self._client_set = True
         return self.client
 
     def _exit(self):
         if self._client_set:
-            self.env.client_var.reset(self._client_var_token)
-        _current_job.reset(self._job_var_token)
+            self.ctx.client_var.reset(self._client_var_token)
+        _current_context.reset(self._ctx_var_token)
 
     def __enter__(self):
         return self._enter()
@@ -62,27 +62,28 @@ class _ClientContextManager:
     def __aexit__(self, exc_type, exc_val, tb):
         self._exit()
 
-class ClientContext:
+class ClientAgent:
     def __init__(self, config: Config):
         self.config = config
 
-    def create_client(self, *, proxy: Optional[str] = None, work_dir: Optional[str] = None) -> yt.YtClient: # todo check when proxy set
-        proxy = proxy or self.config.get_proxy()
-        work_dir = work_dir or self.config.default_work_dir
-        return _create_client_cached(proxy=proxy, work_dir=work_dir, thread_id=threading.get_ident())
-
-    # todo rename with context
-    def dag_context(self, env: "RunnerEnv", *, proxy: Optional[str] = None, work_dir: Optional[str] = None) -> _ClientContextManager:
-        client = self.create_client(proxy=proxy, work_dir=work_dir)
-        return _ClientContextManager(env, client)
-
     @staticmethod
     def client_var_template(job_id: str) -> contextvars.ContextVar:
-        return contextvars.ContextVar(f"client_job_{job_id}_ContextVar")
+        return contextvars.ContextVar(f"client_var_{job_id}_ContextVar")
 
-    def run_in_context(self, env: "RunnerEnv", func: Callable, work_dir: Optional[str] = None, *args, **kwargs):
-        with self.dag_context(env=env, work_dir=work_dir):
-            return func(*args, **kwargs)
+    def create_client(self, *, proxy: Optional[str] = None, prefix: Optional[str] = None) -> yt.YtClient: # todo check when proxy set
+        proxy = proxy or self.config.get_proxy()
+        prefix = prefix or self.config.default_work_dir
+
+        return _create_client_cached(proxy=proxy, prefix=prefix, thread_id=threading.get_ident())
+
+    def client_context(self, client_state, *, proxy=None, prefix=None) -> _ClientContextManager:
+        client = self.create_client(proxy=proxy, prefix=prefix)
+        return _ClientContextManager(client_state, client)
+
+    @staticmethod
+    def run_with_client(client_state: "ClientState", *, func: Callable[[], Any], proxy=None, prefix=None):
+        with client_state._agent.client_context(client_state, proxy=proxy, prefix=prefix):
+            return func()
 
 class ContextWrapper(Protocol):
     def __call__(self, func: Callable, *f_args, **f_kwargs) -> Any: ...
@@ -90,24 +91,30 @@ class ContextWrapper(Protocol):
     def get_bound(self) -> dict[str, Any]: ...
     _target: Callable
 
-def context_wrapper(context: ClientContext, /, **bound):
-    target_func = ClientContext.run_in_context
-
+def context_wrapper(**bound):
+    target_func = ClientAgent.run_with_client
     def get_bound() -> dict[str, Any]:
         return dict(bound)
-
-    def bind(**kwargs) -> Callable[..., Any]:
+    def bind(**kwargs):
         kwargs.update(get_bound())
-        return context_wrapper(context, **kwargs)
+        return context_wrapper(**kwargs)
 
-    def _callable(func: Callable, *f_args, **f_kwargs):
+    def _callable(func: Optional[Callable[[], Any]] = None):
+        context_args = get_bound()
+        client_state = context_args.pop("client_state", None)
+        if client_state is None:
+            client_state = get_current_context()
+        if client_state is None:
+            raise RuntimeError("No current job set; context_wrapper requires active RunnerEnv")
+
+        if func is None:
+            func = context_args.pop("func", None)
+        if func is None:
+            raise TypeError("No function provided to wrapper (neither at create-time nor call-time).")
         if not callable(func):
             raise TypeError(f"Expected callable, got {type(func)}")
 
-        context_args = get_bound()
-        wrapped_func = functools.partial(func, *f_args, **f_kwargs)
-
-        return target_func(self=context, func=wrapped_func, **context_args)
+        return target_func(client_state, func=func, **context_args)
 
     wrapper = _callable
     wrapper.bind = bind
@@ -122,15 +129,16 @@ def context_wrapper(context: ClientContext, /, **bound):
     return wrapper
 
 def with_yt_client(func_opt=None, *, client_param: str = "yt_client"):
-    def _d(f):
+    def _d(func):
         import inspect
-        signature = inspect.signature(f)
+        signature = inspect.signature(func)
         accepts_client_param = client_param in signature.parameters
 
-        @functools.wraps(f)
+        @functools.wraps(func)
         def _sync_wrapper(*args, **kwargs):
-            job = get_current_job()
+            job = get_current_context()
             client = None
+
             if job is not None:
                 try:
                     client = job.client_var.get()
@@ -138,20 +146,43 @@ def with_yt_client(func_opt=None, *, client_param: str = "yt_client"):
                     client = None
 
             if client is None:
-                client = _create_client_cached(None, None, threading.get_ident())
+                if job is not None:
+                    client = job._agent.create_client()
+                else:
+                    client = _create_client_cached(None, None, threading.get_ident())
 
             if accepts_client_param:
                 if client_param not in kwargs or kwargs.get(client_param) is None:
                     kwargs[client_param] = client
-                return f(*args, **kwargs)
+                return func(*args, **kwargs)
             else:
                 if job is None:
-                    return f(*args, **kwargs)
+                    return func(*args, **kwargs)
                 with _ClientContextManager(job, client):
-                    return f(*args, **kwargs)
+                    return func(*args, **kwargs)
 
         return _sync_wrapper
 
+    if callable(func_opt):
+        return _d(func_opt)
+    return _d
+
+def with_context(func_opt, *, context_attr="context", client_param: str = "yt_client"):
+    def _d(func):
+        @functools.wraps(func)
+        def _sync_wrapper(self, *args, **kwargs):
+            context = next(
+                (getattr(self, attr) for attr in (context_attr, f"_{context_attr}", f"__{context_attr}") if hasattr(self, attr)),
+                None,
+            )
+            wrapped_with_client = with_yt_client(func, client_param=client_param)
+
+            if context is None:
+                self.log.info(f"Missing context attribute {context_attr} on {self!r}")
+                return wrapped_with_client(self, *args, **kwargs)
+
+            return context(lambda: wrapped_with_client(self, *args, **kwargs))
+        return _sync_wrapper
     if callable(func_opt):
         return _d(func_opt)
     return _d

@@ -1,13 +1,47 @@
 from __future__ import annotations
 
-class DagNode:
-    id: str
+from typing import Union, Callable
+from dataclasses import dataclass
+
+from logging_mixin import LoggingMixin
+
+Accessor = Union[str, Callable[["DagNode"], list[str]]]
+
+@dataclass(frozen=True)
+class Dependency:
+    producer_accessor: Accessor
+    consumer_accessor: Accessor
+
+    @staticmethod
+    def _access(node: "DagNode", accessor) -> list[str]:
+        if callable(accessor):
+            return list(accessor(node))
+
+        attr = getattr(node, accessor, None)
+        if attr is None:
+            node.log.error("Accessor %s returned None for node %s, %s", accessor, node.task_id, node.__class__)
+            return []
+        if callable(attr):
+            return list(attr())
+        return list(attr)
+
+    def upstream_deps(self, node: "DagNode") -> list[str]:
+        return self._access(node, self.consumer_accessor)
+
+    def downstream_deps(self, node: "DagNode") -> list[str]:
+        return self._access(node, self.producer_accessor)
+
+
+class DagNode(LoggingMixin):
+    task_id: str
     dag_id: str
     preceding_task_ids: set[str]
     succeeding_task_ids: set[str]
 
-    def __init__(self, id: str, dag_id: str):
-        self.id = id
+    dependency_rules: list[Dependency] = []
+
+    def __init__(self, task_id: str, dag_id: str):
+        self.task_id = task_id
         self.dag_id = dag_id
         self.preceding_task_ids = set()
         self.succeeding_task_ids = set()
@@ -20,10 +54,6 @@ class DagNode:
     def downstream_task_ids(self) -> list[str]:
         return list(self.succeeding_task_ids)
 
-    @property
-    def task_id(self) -> str:
-        return self.id
-
     def set_upstream(self, tasks: "DagNode" | list["DagNode"]) -> None:
         self._set_relatives(tasks, upstream=True)
 
@@ -34,12 +64,14 @@ class DagNode:
         if not isinstance(tasks, list):
             tasks = [tasks]
 
-        # TODO check dag
-
         for task in tasks:
+            if task.dag_id != self.dag_id:
+                self.log.warning("Cannot set relation to task %s in DAG %s: settable task %s is in a different DAG (%s)",
+                                 task.task_id, self.dag_id, task.task_id, task.dag_id)
+                continue
             if upstream:
-                task.succeeding_task_ids.add(self.id)
-                self.preceding_task_ids.add(task.id)
+                task.succeeding_task_ids.add(self.task_id)
+                self.preceding_task_ids.add(task.task_id)
             else:
-                task.preceding_task_ids.add(self.id)
-                self.succeeding_task_ids.add(task.id)
+                task.preceding_task_ids.add(self.task_id)
+                self.succeeding_task_ids.add(task.task_id)
