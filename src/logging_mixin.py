@@ -8,6 +8,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s module=%(module)-15s %(message)s (%(pathname)s:%(lineno)d)"
 )
 
+logger = logging.getLogger(__name__)
+
 _T = TypeVar("_T")
 class LoggingMixin:
     _log: logging.Logger | None = None

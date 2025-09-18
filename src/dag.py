@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import os
-from datetime import datetime
+import hashlib
 from typing import Any
 
-import yaml
-
-from dag_entity import DagEntity
-from dag_run import DagRun, DagRunRow
-from dag_node import DAGNode
-from ytoperator import make_operator, Operator
-from state import DagRunState
+from task import Task
+from dagref import DagRef
 from logging_mixin import LoggingMixin
-
-import yt.wrapper as yt
+from yt_wrapper import context_wrapper
 
 class DAG(LoggingMixin):
     dag_id: str
@@ -22,74 +15,84 @@ class DAG(LoggingMixin):
 
     work_dir: str
 
-    task_dict: dict[str, DAGNode] # task_dict: dict[str, Operator]
-    upstream: dict[str, list[str]]
-    downstream: dict[str, list[str]]
-
-    def __repr__(self):
-        return f"DAG(dag_id={self.dag_id}, work_dir={self.work_dir}, task_dict={self.task_dict}, upstream={self.upstream})"
+    task_dict: dict[str, Task]
 
     @classmethod
-    def from_dag_entity(cls, de: DagEntity, yt_client: yt.YtClient):
-        cls.logger.info(f"Creating DAG for dag_entity: {de}")
-        dag = cls.__new__(cls)
+    def try_add_dag(cls, spec: dict, work_dir: str) -> (bool, str, str) | None:
+        try:
+            dag = DAG.from_spec_conf(spec=spec, work_dir=work_dir)
+        except Exception as e:
+            cls.logger.error("Failed to create DAG from spec %s: %s", spec, e)
+            return None
+        return DagRef.try_add_dag(dag)
 
-        dag.dag_id = de.dag_id
-        dag.work_dir = de.work_dir
-        dag.task_dict: dict[str, DAGNode] = {}
 
-        spec = yaml.safe_load(yt_client.read_file(de.spec_path))
+    @classmethod
+    def from_spec_conf(cls, spec: dict, work_dir: str) -> DAG:
+        context = context_wrapper(prefix=work_dir)
 
-        outlets_producers: dict[str, list[Operator]] = {} # TODO
+        task_dict: dict[str, Task] = {}
         for task_id, params in spec.get("steps", {}).items():
-            cls.logger.info(f"STEP: {task_id}\nspec: {params}")
             cfg = dict(params)
-            # inlets = cfg.pop('input_table_paths', [])
-            # outlets = cfg.pop('output_table_paths', [])
-            #
-            # abs_inlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in inlets]
-            # abs_outlets = [os.path.join(dag.work_dir, p) if dag.work_dir is not None else p for p in outlets]
-            #
-            # cfg['input_table_paths'] = abs_inlets
-            # cfg['output_table_paths'] = abs_outlets
 
-            operator = make_operator(task_id=task_id, dag_id=dag.dag_id, spec=cfg, yt_client=yt_client, work_dir=dag.work_dir)
-            if operator is None:
-                raise ValueError(f"Unknown operator type: {cfg.get('operation_type', '')}")
-            operator_cls = operator.__class__
-            # operator = operator_cls(task_id=task_id, dag_id=dag.dag_id, spec=cfg, workdir=dag.work_dir) # TODO
-            dag.task_dict[task_id] = operator
+            task = Task.from_spec_conf(cfg, task_id)
 
-            cls.logger.info(f"OPERATOR: {operator_cls}")
-            for outlet in operator.get_output_table_paths():
-                outlets_producers.setdefault(outlet, []).append(operator)
+            if task is None:
+                cls.logger.exception("Cannot build task from spec: %s", cfg) # todo как минимум сразу удалять граф, как максимум ставить состояние задачи skipping, и если от нее не зависят другие - то ок
+                raise ValueError("Task not created %s for %s", task_id, cfg)
 
-        #TODO upstreams, downstreams
-        for tid, op in dag.task_dict.items():
-            for inlet in op.get_input_table_paths(): # [tid]:
-                if producers := outlets_producers.get(inlet):
-                    op.set_upstream(producers)
+            task._context = context
+            task.prepare_user_spec()
+            task_dict[task_id] = task
 
-        dag.upstream = {tid: list(op.upstream_task_ids) for tid, op in dag.task_dict.items()}
-        dag.downstream = {tid: list(op.downstream_task_ids) for tid, op in dag.task_dict.items()}
-        cls.logger.info(f"CREATED DAG: {dag}")
+        dag = cls.__new__(cls)
+        dag.dag_id = None
+        dag.work_dir = work_dir
+        dag.task_dict = task_dict
+        dag.resolve_tasks_dependencies()
         return dag
 
-    @staticmethod
-    def create_dagrun(
-            *,
-            yt_client: yt.YtClient,
-            dag: DAG,
-            state: DagRunState,
-            creating_job_id: str | None = None,
-    ) -> DagRun:
-        run = DagRun(dag_id=dag.dag_id, state=state, dag=dag, creating_job_id=creating_job_id)
-        DAG.logger.info(f"CREATED DAGRUN for dag={dag.dag_id}: {run}")
-        run.dag_run_prepare_for_execution(yt_client)
-        return run
+    def resolve_tasks_dependencies(self):
+        from dagnode import Dependency
+        dependency_rules: list[Dependency] = []
+        for task in self.tasks:
+            dependency_rules.extend(getattr(task.__class__, "dependency_rules", []))
+
+        for dep_rule in dependency_rules:
+            producers_map: dict[str, list[Task]] = {}
+
+            for task in self.tasks:
+                for dep_key in dep_rule.downstream_deps(task):
+                    producers_map.setdefault(dep_key, []).append(task)
+
+            for task in self.tasks:
+                for dep_key in dep_rule.upstream_deps(task):
+                    if producers := producers_map.get(dep_key):
+                        task.set_upstream(producers)
+
+    @classmethod
+    def from_serialized_repr(cls, ref: "DagRef.row_type"):
+        from serialized import SerializedDag
+        dag = SerializedDag.deserialize_dag(
+            encoded_dag=SerializedDag.from_json(ref.serialized_repr),
+            dag_id=ref.dag_id)
+
+        context = context_wrapper(prefix=dag.work_dir)
+        for task in dag.task_dict.values():
+            task._context = context
+            task.prepare_user_spec()
+
+        dag.resolve_tasks_dependencies()
+        return dag
+
+    def to_serialized_repr(self) -> tuple[str, str]:
+        from serialized import SerializedDag
+        serialized = SerializedDag.to_json(SerializedDag.serialize_dag(self))
+        payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return serialized, payload_hash
 
     @property
-    def tasks(self) -> list[DAGNode]:
+    def tasks(self) -> list[Task]:
         return list(self.task_dict.values())
 
     @property
@@ -97,9 +100,9 @@ class DAG(LoggingMixin):
         return list(self.task_dict.keys())
 
     @property
-    def roots(self) -> list[DAGNode]: #TODO
-        return [self.task_dict.get(tid, None) for tid, ups in self.upstream.items() if not ups]
+    def roots(self) -> list[Task]:
+        return [self.task_dict.get(t.task_id, None) for t in self.tasks if not t.upstream_task_ids]
 
     @property
-    def leaves(self) -> list[DAGNode]:
-        return [self.task_dict.get(tid, None) for tid, downs in self.downstream.items() if not downs]
+    def leaves(self) -> list[Task]:
+        return [self.task_dict.get(t.task_id, None) for t in self.tasks if not t.downstream_task_ids]

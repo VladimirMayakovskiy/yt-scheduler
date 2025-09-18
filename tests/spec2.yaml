@@ -1,6 +1,0 @@
-steps:
-  just_sort:
-    operation: sort
-    input_table_paths: [ "input_table1" ]
-    output_table_paths: [ "output_table" ]
-    sort_by: [ "x" ]
