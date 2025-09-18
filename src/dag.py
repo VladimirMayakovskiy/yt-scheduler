@@ -5,6 +5,7 @@ from typing import Any
 
 from task import Task
 from dagref import DagRef
+from errors import DagInitializationError
 from logging_mixin import LoggingMixin
 from yt_wrapper import context_wrapper
 
@@ -18,16 +19,6 @@ class DAG(LoggingMixin):
     task_dict: dict[str, Task]
 
     @classmethod
-    def try_add_dag(cls, spec: dict, work_dir: str) -> (bool, str, str) | None:
-        try:
-            dag = DAG.from_spec_conf(spec=spec, work_dir=work_dir)
-        except Exception as e:
-            cls.logger.error("Failed to create DAG from spec %s: %s", spec, e)
-            return None
-        return DagRef.try_add_dag(dag)
-
-
-    @classmethod
     def from_spec_conf(cls, spec: dict, work_dir: str) -> DAG:
         context = context_wrapper(prefix=work_dir)
 
@@ -38,8 +29,8 @@ class DAG(LoggingMixin):
             task = Task.from_spec_conf(cfg, task_id)
 
             if task is None:
-                cls.logger.exception("Cannot build task from spec: %s", cfg) # todo как минимум сразу удалять граф, как максимум ставить состояние задачи skipping, и если от нее не зависят другие - то ок
-                raise ValueError("Task not created %s for %s", task_id, cfg)
+                cls.logger.exception("Cannot build task from spec: %s", cfg)
+                raise DagInitializationError("Task not created %s for %s", task_id, cfg)
 
             task._context = context
             task.prepare_user_spec()
@@ -71,18 +62,25 @@ class DAG(LoggingMixin):
                         task.set_upstream(producers)
 
     @classmethod
-    def from_serialized_repr(cls, ref: "DagRef.row_type"):
+    def from_serialized_repr(cls, ref: "DagRef.row_type") -> DAG:
         from serialized import SerializedDag
-        dag = SerializedDag.deserialize_dag(
-            encoded_dag=SerializedDag.from_json(ref.serialized_repr),
-            dag_id=ref.dag_id)
+        try:
+            dag = SerializedDag.deserialize_dag(
+                encoded_dag=SerializedDag.from_json(ref.serialized_repr),
+                dag_id=ref.dag_id)
+        except Exception as e:
+            raise DagInitializationError(f"Failed to deserialize DAG {ref.dag_id}: {e}") from e
 
-        context = context_wrapper(prefix=dag.work_dir)
-        for task in dag.task_dict.values():
-            task._context = context
-            task.prepare_user_spec()
+        try:
+            context = context_wrapper(prefix=dag.work_dir)
+            for task in dag.task_dict.values():
+                task._context = context
+                task.prepare_user_spec()
 
-        dag.resolve_tasks_dependencies()
+            dag.resolve_tasks_dependencies()
+        except Exception as e:
+            raise DagInitializationError(f"Failed to initialize DAG {dag.dag_id}: {e}") from e
+
         return dag
 
     def to_serialized_repr(self) -> tuple[str, str]:

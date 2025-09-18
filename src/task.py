@@ -4,6 +4,7 @@ from typing import Callable
 
 from yt_wrapper import with_yt_client, with_context
 from dagnode import DagNode, Dependency
+from errors import DagInitializationError
 import hashlib
 
 import yt.wrapper as yt
@@ -81,12 +82,20 @@ class Task(DagNode):
     def run_operation(self, mutation_id, yt_client: yt.YtClient) -> str:
         return yt_client.run_operation(self.spec_builder, sync=False, run_operation_mutation_id=mutation_id, enable_optimizations=True)
 
+    @staticmethod
+    @with_yt_client
+    def abort_operation(operation, reason=None, yt_client: yt.YtClient=None):
+        return yt_client.abort_operation(operation, reason)
+
     @classmethod
     @with_yt_client
     def from_serialized_repr(cls, ref: "TaskRef.row_type") -> Task:
         from serialized import SerializedTask
-        task = SerializedTask.deserialize_operator(SerializedTask.from_json(ref.serialized_repr))
-        return task
+        try:
+            task = SerializedTask.deserialize_operator(SerializedTask.from_json(ref.serialized_repr))
+            return task
+        except Exception as e:
+            raise DagInitializationError(f"Failed to deserialize Task {ref.task_id} from dag {ref.dag_id}: {e}") from e
 
     def to_serialized_repr(self) -> tuple[str, str]:
         from serialized import SerializedTask

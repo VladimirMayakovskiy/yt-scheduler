@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import typing
 from dataclasses import field, asdict, KW_ONLY
-from datetime import datetime
-from types import SimpleNamespace
-from typing import Optional, ClassVar
+from datetime import datetime, timezone as tz
+from typing import Optional, ClassVar, Any
 
-from rows_helpers import make_formatted_select
+from rows_helpers import make_formatted_select, process_filter_value, format_select_columns, copy_fields
 from base_row import YtRow, TablePath
+if typing.TYPE_CHECKING:
+    from scheduler import ShardingOptions
+    from dagrun import DagRun
 from state import TaskRunState
 from logging_mixin import LoggingMixin
 from task import Task
@@ -17,7 +20,7 @@ import yt.wrapper as yt
 @yt.yt_dataclass
 class TaskRunRow(YtRow):
     table_path:  ClassVar[str] = TablePath("task_run")
-    key_columns: ClassVar[list[str]] = ["run_id"]
+    key_columns: ClassVar[str] = ["run_id"]
     alias: ClassVar[str] = "taskrun"
 
     run_id: str = field(default_factory=lambda: yt.common.generate_uuid())
@@ -26,7 +29,7 @@ class TaskRunRow(YtRow):
 
     task_id: str
     dag_id: str
-    dag_run_id: str
+    dagrun_id: str
     state: str
 
     operation_id: Optional[str] = None
@@ -44,30 +47,38 @@ class TaskRun(TaskRunRow, LoggingMixin):
         self,
         row: TaskRun.row_type | None = None,
         *,
-        dag_run_id: str | None = None,
-        operator: Task | None = None,
+        run_id: str | None = None,
+        task: Task | None = None,
+        dagrun_id: str | None = None,
         state: TaskRun.state_type | None = None,
+        operation_id: str | None = None,
+        scheduled_at: str | None = None,
         queued_at: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
-        scheduled_at: str | None = None,
     ):
         if row is not None:
             super().__init__(**asdict(row))
         else:
-            state = state if state else self.state_type.SCHEDULED
-            scheduled_at = scheduled_at or datetime.utcnow().isoformat()
+            def _to_iso(value: datetime | str | None) -> str | None:
+                if isinstance(value, datetime):
+                    return value.isoformat()
+                return value
 
             super().__init__(
-                dag_run_id=dag_run_id,
-                task_id=operator.task_id,
-                dag_id=operator.dag_id,
+                task_id=task.task_id,
+                dag_id=task.dag_id,
+                dagrun_id=dagrun_id,
                 state=state,
-                scheduled_at=scheduled_at,
-                queued_at=queued_at,
-                start_date=start_date,
-                end_date=end_date,
+                operation_id=operation_id,
+                scheduled_at=_to_iso(scheduled_at),
+                queued_at=_to_iso(queued_at),
+                start_date=_to_iso(start_date),
+                end_date=_to_iso(end_date),
             )
+
+            if run_id is not None:
+                self.run_id = run_id
 
     @classmethod
     def fetch_rows(
@@ -75,20 +86,24 @@ class TaskRun(TaskRunRow, LoggingMixin):
         run_id: str | list[str] | tuple[str] = None,
         task_id: str | list[str] | tuple[str] = None,
         dag_id: str | list[str] | tuple[str] = None,
-        dag_run_id: str | list[str] | tuple[str] = None,
+        dagrun_id: str | list[str] | tuple[str] = None,
         state: TaskRun.state_type | list[TaskRun.state_type] | tuple[TaskRun.state_type] = None,
         operation_id: str | list[str] | tuple[str] = None,
         limit: int = None,
+        shard_key: str = None,
+        shard: "ShardingOptions" | None = None,
     ) -> list[TaskRun]:
         rows = make_formatted_select(
             cls=cls,
             run_id=run_id,
             task_id=task_id,
             dag_id=dag_id,
-            dag_run_id=dag_run_id,
+            dagrun_id=dagrun_id,
             state=state,
             operation_id=operation_id,
             limit=limit,
+            shard_key=shard_key,
+            shard=shard,
         )
         return [cls(cls.row_type(**row)) for row in rows]
 
@@ -98,50 +113,79 @@ class TaskRun(TaskRunRow, LoggingMixin):
         run_id: str = None,
         task_id: str = None,
         dag_id: str = None,
-        dag_run_id: str = None,
+        dagrun_id: str = None,
         operation_id: str = None
     ) -> "TaskRun" | None:
-        return YtRow.get(cls=cls, run_id=run_id, task_id=task_id, dag_id=dag_id,
-                         dag_run_id=dag_run_id, operation_id=operation_id)
-
-
-    def as_operator(self):
-        from dagref import TaskRef
-        try:
-            ref = TaskRef.get(dag_id=self.dag_id, task_id=self.task_id)
-            task: Task = Task.from_serialized_repr(ref=ref)
-
-            return SimpleNamespace(run_operation=lambda: task.run_operation(mutation_id=self.run_id), row=self)
-        except yt.YtError as e:
-            raise e
-        except Exception as e:
-            TaskRun.logger.warning(
-                "TaskRun %s is not runnable (state=%s, dag_id=%s): %s",
-                self.run_id, self.state, self.dag_id, e
-            )
-            return None
+        return super(TaskRunRow, cls).get(
+            run_id=run_id,
+            task_id=task_id,
+            dag_id=dag_id,
+            dagrun_id=dagrun_id,
+            operation_id=operation_id
+        )
 
     @classmethod
     @with_yt_client
-    def get_executable_task_runs_to_queue(cls) -> list["TaskRun"]:
-        return cls.fetch_rows(state=cls.state_type.QUEUED)
+    def get_executable_task_runs_to_queue(cls, shard: "ShardingOptions" | None = None) -> list["TaskRun"]:
+        return cls.fetch_rows(state=cls.state_type.QUEUED,
+                              shard_key=cls.key_columns[0],
+                              shard=shard)
 
     @classmethod
     @with_yt_client
-    def get_running_task_runs_to_poll(cls) -> list["TaskRun"]:
-        res = cls.fetch_rows(state=cls.state_type.RUNNING)
-        return res
+    def get_running_task_runs_to_poll(cls, shard: "ShardingOptions" | None = None) -> list["TaskRun"]:
+        return cls.fetch_rows(state=cls.state_type.RUNNING,
+                              shard_key=cls.key_columns[0],
+                              shard=shard)
 
-    @with_yt_client
-    def _update_row(
-        self,
-        yt_client: yt.YtClient,
+    @staticmethod
+    def update_row(
+        row: str | TaskRun.row_type | TaskRun,
+        *,
         state: TaskRun.state_type | None = None,
         operation_id: str | None = None,
-    ) -> TaskRun.row_type:
-        def _build_row() -> TaskRun.row_type:
-            base = TaskRun.row_type(**asdict(self))
-            now = datetime.utcnow().isoformat() # todo
+        required_task_id: str | list[str] | tuple[str] | None = None,
+        required_dag_id: str | list[str] | tuple[str] | None = None,
+        required_dagrun_id: str | list[str] | tuple[str] | None = None,
+        required_state: TaskRun.state_type | list[TaskRun.state_type] | tuple[TaskRun.state_type] | None = None,
+        required_operation_id: str | list[str] | tuple[str] | None = None,
+    ) -> tuple[str | TaskRun.row_type | TaskRun, dict[str, Any], dict[str, Any]]:
+        from rows_helpers import set_param
+        params: dict[str, Any] = {}
+        set_param(params, "state", state)
+        set_param(params, "operation_id", operation_id)
+
+        requires: dict[str, Any] = {}
+        set_param(requires, "task_id", required_task_id)
+        set_param(requires, "dag_id", required_dag_id)
+        set_param(requires, "dagrun_id", required_dagrun_id)
+        set_param(requires, "state", required_state)
+        set_param(requires, "operation_id", required_operation_id)
+        return row, params, requires
+
+    @classmethod
+    @with_yt_client
+    def set_state(
+        cls,
+        rows: list[ tuple[str | TaskRun.row_type | TaskRun, dict[str, Any], dict[str, Any]] ]
+              |     tuple[str | TaskRun.row_type | TaskRun, dict[str, Any], dict[str, Any]],
+    ) -> list[TaskRun]:
+        if not isinstance(rows, list):
+            rows = [rows]
+
+        fetchable_rids = set() # rows_with_required or isinstance(row, str)
+        for r, _, reqs in rows:
+            if isinstance(r, str):
+                fetchable_rids.add(r)
+            else:
+                if reqs:
+                    fetchable_rids.add(r.run_id)
+
+        def _fetch_rows(rids) -> dict[str, cls]:
+            return {tr.run_id: tr for tr in cls.fetch_rows(run_id=list(rids))}
+        def _build_row(row: cls, state: cls.state_type | None = None, operation_id: str | None = None) -> cls.row_type:
+            base = TaskRun.row_type(**asdict(row))
+            now = datetime.now(tz.utc).isoformat()
             if state is not None and base.state != state:
                 if state in TaskRun.state_type.unfinished_states:
                     base.scheduled_at = base.scheduled_at or now
@@ -151,7 +195,7 @@ class TaskRun(TaskRunRow, LoggingMixin):
                     else:
                         base.queued_at = base.queued_at or now
                         if state == TaskRun.state_type.RUNNING:
-                            base.start_date = now # TODO get from op
+                            base.start_date = now
                         else:
                             base.start_date = None
                     base.end_date = None
@@ -162,31 +206,96 @@ class TaskRun(TaskRunRow, LoggingMixin):
             if operation_id is not None:
                 base.operation_id = operation_id
             return base
+        def _is_matched(row, requires):
+            for k, v in requires.items():
+                if v is None:
+                    continue
+                if isinstance(v, (list, tuple, set)):
+                    if getattr(row, k, None) not in v:
+                        return False
+                else :
+                    if getattr(row, k, None) != v:
+                        return False
+            return True
 
-        row_obj = _build_row()
+        def _set_state(fetched=None):
+            for row, params, requires in rows:
+                try:
+                    if isinstance(row, str):
+                        tr = fetched[row]
+                    else:
+                        if requires:
+                            tr = fetched[row.run_id]
+                        elif isinstance(row, cls):
+                            tr = row
+                        elif isinstance(row, cls.row_type):
+                            tr = TaskRun(row=row)
+                        else:
+                            raise TypeError
+                except Exception as e:
+                    cls.logger.warning("Failed to get row for task run id=%s: %s",
+                                       row if isinstance(row, str) else row.run_id, e)
+                    continue
+
+                if not isinstance(row, str) and row != tr:
+                    copy_fields(row, tr, cls=TaskRun)
+
+                if requires and not _is_matched(tr, requires):
+                    continue
+
+                row_update = _build_row(tr, **params)
+                rows_batch.append(row_update)
+                if isinstance(row, str):
+                    trs.append(tr)
+                else:
+                    trs.append(row)
+
+            if rows_batch:
+                try:
+                    cls.upsert_rows(rows=rows_batch)
+                except Exception as e:
+                    cls.logger.exception("Failed to apply batch updates: %s", e)
+                    raise
+
+        trs = []
+        rows_batch = []
+        if fetchable_rids:
+            try:
+                with yt.Transaction(type="tablet"):
+                    fetched_rows = _fetch_rows(fetchable_rids)
+                    _set_state(fetched_rows)
+            except Exception as exception:
+                cls.logger.exception("Transaction failed: %s", exception)
+                raise
+        else:
+            _set_state({})
+
+
+        for r, r_update in zip(trs, rows_batch):
+            if r != r_update:
+                copy_fields(r, r_update, cls=TaskRun)
+        return trs
+
+    @classmethod
+    @with_yt_client
+    def get_orphaned_task_runs(cls, shard: "ShardingOptions", yt_client: yt.YtClient) -> list["TaskRun"]:
+        from dagrun import DagRun
+        _, dangling_states = process_filter_value([TaskRun.state_type.QUEUED, TaskRun.state_type.RUNNING])
+        num_virtual_shards, num_shards, shard_index = shard["num_virtual_shards"], shard["num_shards"], shard["shard_index"]
         try:
-            self.log.info(f"Updating task run id={self.run_id} with state={row_obj.state}")
-            yt_client.insert_rows(TaskRun.table_path, [asdict(row_obj)]) # change we have create_rows method
+            rows = list(yt_client.select_rows(
+                f"""
+                {format_select_columns(cls)}
+                from [{cls.table_path}] as {cls.alias}
+                left join [{DagRun.table_path}] as {DagRun.alias} 
+                on {cls.alias}.dagrun_id = {DagRun.alias}.run_id
+                where {cls.alias}.state in {dangling_states} 
+                    and {DagRun.alias}.state = '{DagRun.state_type.FAILED}'
+                    and (farm_hash(run_id) % {num_virtual_shards}) % {num_shards} = {shard_index}
+                """,
+                allow_join_without_index=True
+            ))
+            return [cls(cls.row_type(**row)) for row in rows]
         except Exception as e:
-            TaskRun.logger.exception("Failed update state for task run id=%s: %s", self.run_id, e)
+            cls.logger.exception("Failed to select orphan task run rows for %s: %s", cls.__name__, e)
             raise
-
-        self.state = row_obj.state
-        self.scheduled_at = row_obj.scheduled_at
-        self.queued_at = row_obj.queued_at
-        self.start_date = row_obj.start_date
-        self.end_date = row_obj.end_date
-        self.operation_id = row_obj.operation_id
-        return self
-
-    @staticmethod
-    def update_row(
-        row: TaskRun | TaskRun.row_type | str,
-        state: TaskRun.state_type | None = None,
-        operation_id: str | None = None
-    ) -> TaskRun.row_type:
-        if isinstance(row, str):
-           row = TaskRun.get(run_id=row)
-        if isinstance(row, TaskRun.row_type):
-            row = TaskRun(row=row)
-        return row._update_row(state=state, operation_id=operation_id)

@@ -1,198 +1,225 @@
 import pytest
+from unittest.mock import Mock
 
 import logging
 import threading
-from datetime import datetime, timezone as tz
-from unittest.mock import Mock
+from types import SimpleNamespace
 
-from job import JobContext, ClientState
 from dag import DAG
 from scheduler import Scheduler
-from pool import Pool
 from dagref import DagMeta, DagRef
 from dagrun import DagRun
-from taskrun import TaskRun
 
-from conftest import simple_spec
-from test_helpers import gen_id, scheduler_stub
+from conftest_helpers import (
+    gen_id, dagref_factory, scheduler_stub, scheduler_stub_factory, FakeDagInitializationError, ControlledPool,
+    get_from_mock_call, throw
+)
+from conftest_env import patch_insert_rows_threadsafe
+
+import yt.wrapper as yt
 
 logging.getLogger().setLevel(logging.CRITICAL)
 
-def test_dagref_try_add_dag_idempotency(test_env_with_context, add_dag, clear_dag_ref):
-    clear_dag_ref()
+def test_get_dag_returns_none_on_parse_error_and_caches_success(scheduler_stub, dagref_factory, monkeypatch):
+    dagref = dagref_factory(serialized_repr="bad")
+    monkeypatch.setattr(DAG, "from_serialized_repr", staticmethod(lambda *args: throw(FakeDagInitializationError("Injected"))))
 
-    success_first, did_first, mid_first = add_dag()
-    assert success_first == True
-    assert len(DagMeta.fetch_rows(dag_id=did_first)) == 1
+    dag = scheduler_stub._get_dag(ref=dagref)
+    assert dag is None
+    assert dagref.dag_id not in scheduler_stub._dag_cache
 
-    success_second, did_second, mid_second = add_dag()
-    assert success_second == False
-    assert did_second == did_first
-    assert mid_second != mid_first
+    fake_dag = SimpleNamespace(task_ids=[], tasks=[])
+    monkeypatch.setattr(DAG, "from_serialized_repr", staticmethod(lambda *args: fake_dag))
+    dag = scheduler_stub._get_dag(ref=dagref)
 
-    assert len(DagMeta.fetch_rows(dag_id=did_second)) == 2
+    assert dag is fake_dag
+    assert scheduler_stub._dag_cache.get(dagref.dag_id) is fake_dag
 
-def test_scheduler_try_claim_atomicity_on_meta_update_failure(monkeypatch, test_env_with_context, add_dag_clean, scheduler_stub, env_client):
-    dag_id, meta_id = add_dag_clean()
+def test_create_dagruns_increments_created_counter_on_success(scheduler_stub_factory, gen_id, monkeypatch):
+    sched = scheduler_stub_factory(pool=ControlledPool())
+    monkeypatch.setattr(sched, "_try_claim_dagruns", lambda *args, **kwargs: 2)
 
-    insert_rows_orig = env_client.insert_rows
-    def insert_rows_inject(path, rows, *args, **kwargs):
-        if path == DagRef.meta_row_type.table_path:
-            raise RuntimeError("Injected failure for DagMeta update")
-        return insert_rows_orig(path, rows, *args, **kwargs)
+    sched._create_dagruns_for_dags()
+    with sched._created_dagruns_lock:
+        assert sched._created_dagruns_since_last_tick == 2
 
-    monkeypatch.setattr(env_client, "insert_rows", insert_rows_inject)
+    monkeypatch.setattr(sched, "_try_claim_dagruns", lambda *args, **kwargs: throw(RuntimeError("Injected")))
+    sched._create_dagruns_for_dags()
+    with sched._created_dagruns_lock:
+        assert sched._created_dagruns_since_last_tick == 2
 
-    with pytest.raises(Exception):
-        scheduler_stub._try_claim_dagruns()
+def test_try_claim_dagruns_marks_invalid_metas_and_triggers_create(test_env_with_context, scheduler_stub_factory,
+                                                                   dagref_factory, monkeypatch):
+    from rows_clients import DagRefClient
 
-    runs = DagRun.fetch_rows(dag_id=dag_id)
+    sched = scheduler_stub_factory(pool=ControlledPool())
+    target_dagref = dagref_factory(serialized_repr="target")
+    target_meta = DagMeta(dag_id=target_dagref.dag_id)
+    invalid_dagref = dagref_factory(serialized_repr="invalid")
+    invalid_meta = DagMeta(dag_id=invalid_dagref.dag_id)
+
+    def fake_get_dag(ref):
+        if ref.dag_id == invalid_dagref.dag_id:
+            return None
+        return SimpleNamespace(task_ids=[], tasks=[])
+    monkeypatch.setattr(DagRefClient, "dags_needing_dagruns", lambda *args, **kwargs: [(target_dagref, target_meta),
+                                                                                       (invalid_dagref, invalid_meta)])
+    monkeypatch.setattr(DAG, "from_serialized_repr", lambda *args: throw(FakeDagInitializationError("Injected")))
+    monkeypatch.setattr(sched, "_get_dag", fake_get_dag)
+    monkeypatch.setattr(sched, "_create_dag_runs_atomic", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(DagRef, "dags_needing_dagruns_of_metas", lambda *args, **kwargs: [(invalid_dagref, invalid_meta)])
+
+    assert sched._try_claim_dagruns() == 1
+    assert DagMeta.get(id=invalid_meta.id).run_id.startswith("ERR:PARSING_FAILED")
+
+def test_try_claim_dagruns_skips_meta_if_dag_not_found_then_skips_create(test_env_with_context, scheduler_stub_factory,
+                                                                         dagref_factory, monkeypatch):
+    sched = scheduler_stub_factory(pool=ControlledPool())
+    dagref = dagref_factory(upsert_rows=True)
+    meta = DagMeta(dag_id=dagref.dag_id)
+    DagMeta.upsert_rows(rows=meta)
+
+    _get_dag_calls = 0
+    def fake_get_dag(ref):
+        nonlocal _get_dag_calls
+        _get_dag_calls += 1
+        if _get_dag_calls == 1:
+            return None
+        return Mock()
+    monkeypatch.setattr(sched, "_get_dag", lambda *args, **kwargs: fake_get_dag)
+    monkeypatch.setattr(sched, "_create_dag_runs_atomic", lambda *args, **kwargs: 0)
+
+    assert sched._try_claim_dagruns() == 0
+    assert DagMeta.get(id=meta.id).run_id is None
+
+def test_create_dag_runs_atomic_atomicity_on_meta_upsert_fails(test_env_with_context, dagref_factory, gen_id, monkeypatch, mocker):
+    from scheduler import _create_dag_runs_atomic
+
+    dagref = dagref_factory(upsert_rows=True)
+    meta_no_need_run = DagMeta(dag_id=dagref.dag_id, run_id=gen_id)
+    target_meta = DagMeta(dag_id=dagref.dag_id)
+    DagMeta.upsert_rows(rows=[meta_no_need_run, target_meta])
+
+    meta_upsert_rows_calls = []
+    def fake_meta_upsert_rows(rows):
+        nonlocal meta_upsert_rows_calls
+        if not isinstance(rows, list):
+            rows = [rows]
+        meta_upsert_rows_calls.extend(rows)
+        raise RuntimeError("Injected")
+    monkeypatch.setattr(DagMeta, "upsert_rows", fake_meta_upsert_rows)
+    mock = mocker.patch("scheduler.DagRun.upsert_rows", wraps=DagRun.upsert_rows)
+
+    with pytest.raises(RuntimeError):
+        _create_dag_runs_atomic(metas=[meta_no_need_run.id, target_meta.id])
+
+    assert len(meta_upsert_rows_calls) == 1 and meta_upsert_rows_calls[0].id == target_meta.id
+
+    assert mock.call_count == 1
+    runs = DagRun.fetch_rows(dag_id=dagref.dag_id)
     assert len(runs) == 0
 
-    metas = DagMeta.fetch_rows(dag_id=dag_id)
-    assert all(m.run_id is None for m in metas)
-
-def test_concurrent_schedulers_try_claim_one_wins_no_artifacts(test_env_with_context, add_dag_clean, scheduler_stub, env_context):
-    dag_id, meta_id = add_dag_clean()
+def test_concurrent_try_claim_one_wins_no_artifacts(test_env_with_context, env_client, env_context, scheduler_stub,
+                                                    dagref_factory, monkeypatch):
+    dagref = dagref_factory(upsert_rows=True)
+    meta = DagMeta(dag_id=dagref.dag_id)
+    DagMeta.upsert_rows(rows=meta)
 
     sched1 = scheduler_stub
     sched2 = scheduler_stub
 
-    results = []
-    exceptions = []
+    monkeypatch.setattr(sched1, "_get_dag", lambda *args, **kwargs: Mock())
+    monkeypatch.setattr(sched2, "_get_dag", lambda *args, **kwargs: Mock())
 
-    def run_try_claim(sched):
-        try:
-            r = env_context(sched._try_claim_dagruns)
-            results.append(r)
-        except Exception as e:
-            exceptions.append(e)
-
-    thread1 = threading.Thread(target=run_try_claim, args=(sched1,))
-    thread2 = threading.Thread(target=run_try_claim, args=(sched2,))
-    thread1.start()
-    thread2.start()
-
-    thread1.join()
-    thread2.join()
-
-    runs = DagRun.fetch_rows(dag_id=dag_id)
-    assert len(runs) == 1
-    assert runs[0].state == DagRun.state_type.SCHEDULED
-
-    metas = DagMeta.fetch_rows(dag_id=dag_id)
-    assert len(metas) == 1
-    assert metas[0].run_id == runs[0].run_id
-
-def test_try_claim_retry_on_transaction_conflict(monkeypatch, test_env_with_context, add_dag_clean, scheduler_stub, env_client):
-    from utils import retry_on_transaction_conflict
-
-    dag_id, meta_id = add_dag_clean()
-
-    commit_calls = 0
-    transaction_orig = env_client.Transaction
-
-    class FakeTransaction:
-        def __init__(self, *args, **kwargs):
-            self._real_tx = transaction_orig(*args, **kwargs)
-
-        def __enter__(self):
-            return self._real_tx.__enter__()
-
-        def __exit__(self, exc_type, exc_val, tb):
+    with patch_insert_rows_threadsafe(env_client) as fake_insert_rows:
+        def run_try_claim(sched):
+            yt.YtClient.insert_rows = fake_insert_rows
             try:
-                return self._real_tx.__exit__(exc_type, exc_val, tb)
-            finally:
-                nonlocal commit_calls
-                commit_calls += 1
-                if commit_calls == 1:
-                    raise RuntimeError("Transaction lock conflict injected")
-                return None
+                env_context(sched._try_claim_dagruns)
+            except Exception:
+                pass
 
-        def __getattr__(self, item):
-            return getattr(self._real_tx, item)
+        thread1 = threading.Thread(target=run_try_claim, args=(sched1,))
+        thread2 = threading.Thread(target=run_try_claim, args=(sched2,))
+        thread1.start()
+        thread2.start()
 
-    monkeypatch.setattr(env_client, "Transaction", FakeTransaction)
+        thread1.join()
+        thread2.join()
 
-    wrapped = retry_on_transaction_conflict(max_retries=1)(scheduler_stub._try_claim_dagruns)
+        runs = DagRun.fetch_rows(dag_id=dagref.dag_id)
+        assert len(runs) == 1
+        assert runs[0].state == DagRun.state_type.SCHEDULED
 
-    num_runs = wrapped()
-    assert num_runs == 0
+        metas = DagMeta.fetch_rows(dag_id=dagref.dag_id)
+        assert len(metas) == 1
+        assert metas[0].run_id == runs[0].run_id
 
-    runs = DagRun.fetch_rows(dag_id=dag_id)
-    assert len(runs) == 1
+def test__set_invalid_meta_idempotency(test_env_with_context, env_client, dagref_factory, mocker):
+    from scheduler import _set_invalid_meta
 
-    assert commit_calls == 2
+    dagref = dagref_factory(upsert_rows=True)
+    meta = DagMeta(dag_id=dagref.dag_id)
+    DagMeta.upsert_rows(rows=meta)
 
-def test_try_claim_idempotency(monkeypatch, test_env_with_context, add_dag_clean, scheduler_stub):
-    dag_id, meta_id = add_dag_clean(clear_drs=True)
+    mock = mocker.patch("dagref.DagMeta.upsert_rows", wraps=DagMeta.upsert_rows)
+
+    _set_invalid_meta(invalid_metas=[meta.id], yt_client=env_client)
+
+    assert mock.call_count == 1
+    rows = get_from_mock_call(mock, "rows", default=[])[0]
+    assert any(meta.id == m.id for m in rows)
+
+    upd_meta = DagMeta.get(id=meta.id)
+    assert upd_meta is not None and upd_meta.run_id.startswith("ERR:PARSING_FAILED")
+
+    _set_invalid_meta(invalid_metas=[meta.id], yt_client=env_client)
+
+    assert mock.call_count == 1
+    upd_meta2 = DagMeta.get(id=meta.id)
+    assert upd_meta2 == upd_meta
+
+def test_create_dag_runs_atomic_idempotency(test_env_with_context, env_client, dagref_factory, mocker):
+    from scheduler import _create_dag_runs_atomic
+
+    dagref = dagref_factory(upsert_rows=True)
+    meta = DagMeta(dag_id=dagref.dag_id)
+    DagMeta.upsert_rows(rows=meta)
+
+    mock_meta_upsert_rows = mocker.patch("dagref.DagMeta.upsert_rows", wraps=DagMeta.upsert_rows)
+    mock_dr_upsert_rows = mocker.patch("dagrun.DagRun.upsert_rows", wraps=DagRun.upsert_rows)
+
+    ret = _create_dag_runs_atomic(metas=[meta.id], yt_client=env_client)
+    assert ret == 1
+    assert mock_meta_upsert_rows.call_count == 1
+    assert mock_dr_upsert_rows.call_count == 1
+
+    meta_upserted_rows = get_from_mock_call(mock_meta_upsert_rows, "rows", default=[])
+    assert any(meta.id == m.id for m in meta_upserted_rows)
+
+    upd_meta = DagMeta.get(id=meta.id)
+    assert upd_meta is not None and upd_meta.run_id is not None
+    assert len(DagRun.fetch_rows(dag_id=dagref.dag_id)) == 1
+
+    ret = _create_dag_runs_atomic(metas=[meta.id], yt_client=env_client)
+    assert ret == 0
+    assert mock_meta_upsert_rows.call_count == 1
+    assert mock_dr_upsert_rows.call_count == 1
+
+    upd_meta2 = DagMeta.get(id=meta.id)
+    assert upd_meta2 == upd_meta
+    assert len(DagRun.fetch_rows(dag_id=dagref.dag_id)) == 1
+
+def test_try_claim_idempotency(test_env_with_context, scheduler_stub, dagref_factory, monkeypatch):
+    dagref = dagref_factory(upsert_rows=True)
+    meta = DagMeta(dag_id=dagref.dag_id)
+    DagMeta.upsert_rows(rows=meta)
+
+    monkeypatch.setattr(scheduler_stub, "_get_dag", lambda *args, **kwargs: Mock())
 
     scheduler_stub._try_claim_dagruns()
     scheduler_stub._try_claim_dagruns()
 
-    runs = DagRun.fetch_rows(dag_id=dag_id)
+    runs = DagRun.fetch_rows(dag_id=dagref.dag_id)
     assert len(runs) == 1
     assert runs[0].state == DagRun.state_type.SCHEDULED
-
-def test_queue_dag_run_atomicity(monkeypatch, test_env_with_context, env_client, gen_id):
-    dag = DAG.from_spec_conf(spec=simple_spec, work_dir=None)
-
-    dr = DagRun(run_id=gen_id, dag_id=gen_id, state=DagRun.state_type.SCHEDULED)
-
-    insert_rows_orig = env_client.insert_rows
-    def insert_rows_inject(path, rows, *args, **kwargs):
-        if path == DagRun.table_path:
-            raise RuntimeError("Injected failure for DagRun set_state")
-        return insert_rows_orig(path, rows, *args, **kwargs)
-
-    monkeypatch.setattr(env_client, "insert_rows", insert_rows_inject)
-
-    dr.queue_dag_run(dag=dag)
-
-    trs = TaskRun.fetch_rows(dag_run_id=dr.run_id, dag_id=dr.dag_id)
-    assert len(trs) == 0
-
-    assert dr.state == DagRun.state_type.SCHEDULED
-    runs = DagRun.fetch_rows(run_id=dr.run_id, dag_id=dr.dag_id)
-    assert len(runs) == 0
-
-def test_update_state_handles_fetch_task_runs_exception(monkeypatch, gen_id):
-    dr = DagRun(run_id=gen_id, dag_id=gen_id)
-    monkeypatch.setattr(DagRun, "trs_scheduling_decisions",
-                        lambda self, dag: (_ for _ in ()).throw(RuntimeError("Injected failure for trs_scheduling_decisions")))
-    schedulable_trs = dr.update_state(Mock())
-    assert schedulable_trs == []
-
-def test_update_state_handles_set_state_failure(monkeypatch, test_env_with_context, gen_id):
-    dr = DagRun(run_id=gen_id, dag_id=gen_id, state=DagRun.state_type.RUNNING)
-    DagRun.create_rows(rows=dr)
-    def fake_trs_scheduling_decisions(self, dag):
-        return [ [], [], [], [] ]
-    monkeypatch.setattr(DagRun, "trs_scheduling_decisions", fake_trs_scheduling_decisions)
-    monkeypatch.setattr(DagRun, "set_state",
-                        lambda self, state: (_ for _ in ()).throw(RuntimeError("Injected failure for set_state")))
-    schedulable_trs = dr.update_state(Mock())
-    assert schedulable_trs == []
-
-    runs = DagRun.fetch_rows(run_id=dr.run_id, dag_id=dr.dag_id)
-    assert runs[0].state == DagRun.state_type.RUNNING
-
-def test_set_state_no_change_state_with_internal_error(monkeypatch, test_env_with_context, gen_id):
-    state, start_date = DagRun.state_type.SCHEDULED, datetime.now(tz.utc).isoformat()
-    dr = DagRun(run_id=gen_id, dag_id=gen_id, state=state, start_date=start_date)
-    monkeypatch.setattr(DagRun, "set_state",
-                        lambda self, **kwargs: (_ for _ in ()).throw(RuntimeError("Injected failure for set_state")))
-
-    with pytest.raises(RuntimeError):
-        dr.set_state(state=DagRun.state_type.RUNNING)
-
-    assert dr.state == state and dr.start_date == start_date
-
-def test_schedule_trs_handles_update_rows_exception(monkeypatch):
-    def raise_update_rows(schedulable_trs):
-        raise RuntimeError("Injected failure for update_rows")
-    monkeypatch.setattr(TaskRun, "update_row", staticmethod(raise_update_rows))
-    scheduled_trs = DagRun.schedule_trs([])
-    assert scheduled_trs == 0
-
-# todo разделить на шедулер/таскран/дагран

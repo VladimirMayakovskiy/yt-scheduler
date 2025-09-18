@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from typing import Optional, Callable
-import commands
+import cli_commands
 
 def add_ypath_argument(parser: argparse.ArgumentParser, name: str, help: str = "path in Cypress", **kwargs):
     description = "See also: https://ytsaurus.tech/docs/en/user-guide/storage/ypath" # todo
@@ -32,13 +32,13 @@ def add_group(subparsers: argparse._SubParsersAction, group_name: str, help: Opt
 
 def add_scheduler_parser(subparsers: argparse._SubParsersAction):
     add_parser = add_group(subparsers, "scheduler", help="scheduler commands")
-    add_parser("init", func=commands.prepare_tables, help='Initialize scheduler tables')
-    add_parser("run", func=commands.run_scheduler, help='Run scheduler loop')
+    add_parser("init", func=cli_commands.prepare_tables, help='Initialize scheduler tables')
+    add_parser("run", func=cli_commands.run_scheduler, help='Run scheduler loop')
 
 def add_dags_parser(subparsers: argparse._SubParsersAction):
     add_parser = add_group(subparsers, "dags", help="dag management commands")
 
-    parser = add_parser("add", func=commands.add_dag, help='Add dag')
+    parser = add_parser("add", func=cli_commands.add_dag, help='Add dag')
     add_ypath_argument(parser, "--spec", dest="spec", help="path to workflow specification", required=True)
     parser.add_argument("--work-dir", dest="work_dir", help="working directory for the pipeline")
 

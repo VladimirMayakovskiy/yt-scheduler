@@ -11,11 +11,11 @@ import yt.wrapper as yt
 from config import Config
 
 if typing.TYPE_CHECKING:
-    from job import ClientState
+    from job import ClientContext
 
-_current_context: contextvars.ContextVar["ClientState"] = contextvars.ContextVar("_current_context")
+_current_context: contextvars.ContextVar["ClientContext"] = contextvars.ContextVar("_current_context")
 
-def get_current_context() -> Optional["ClientState"]:
+def get_current_context() -> Optional["ClientContext"]:
     try:
         return _current_context.get()
     except LookupError:
@@ -33,7 +33,7 @@ def _create_client_cached(proxy: Optional[str], prefix: Optional[str], thread_id
     return client
 
 class _ClientContextManager:
-    def __init__(self, ctx: "ClientState", client: yt.YtClient):
+    def __init__(self, ctx: "ClientContext", client: yt.YtClient):
         self.ctx = ctx
         self.client = client
         self._ctx_var_token = None
@@ -76,13 +76,13 @@ class ClientAgent:
 
         return _create_client_cached(proxy=proxy, prefix=prefix, thread_id=threading.get_ident())
 
-    def client_context(self, client_state, *, proxy=None, prefix=None) -> _ClientContextManager:
+    def client_context(self, context, *, proxy=None, prefix=None) -> _ClientContextManager:
         client = self.create_client(proxy=proxy, prefix=prefix)
-        return _ClientContextManager(client_state, client)
+        return _ClientContextManager(context, client)
 
     @staticmethod
-    def run_with_client(client_state: "ClientState", *, func: Callable[[], Any], proxy=None, prefix=None):
-        with client_state._agent.client_context(client_state, proxy=proxy, prefix=prefix):
+    def run_with_client(context: "ClientContext", *, func: Callable[[], Any], proxy=None, prefix=None):
+        with context._agent.client_context(context, proxy=proxy, prefix=prefix):
             return func()
 
 class ContextWrapper(Protocol):
@@ -101,10 +101,10 @@ def context_wrapper(**bound):
 
     def _callable(func: Optional[Callable[[], Any]] = None):
         context_args = get_bound()
-        client_state = context_args.pop("client_state", None)
-        if client_state is None:
-            client_state = get_current_context()
-        if client_state is None:
+        context = context_args.pop("context", None)
+        if context is None:
+            context = get_current_context()
+        if context is None:
             raise RuntimeError("No current job set; context_wrapper requires active RunnerEnv")
 
         if func is None:
@@ -114,7 +114,7 @@ def context_wrapper(**bound):
         if not callable(func):
             raise TypeError(f"Expected callable, got {type(func)}")
 
-        return target_func(client_state, func=func, **context_args)
+        return target_func(context, func=func, **context_args)
 
     wrapper = _callable
     wrapper.bind = bind

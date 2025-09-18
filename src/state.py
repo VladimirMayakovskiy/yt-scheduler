@@ -26,14 +26,14 @@ class TaskRunState(str, Enum):
     RUNNING = "running" # задача активно выполняется
     SUCCESS = "success" # задача успешно завершилась
     FAILED = "failed"
-    # todo add skipped
+    SKIPPED = "skipped"
 
     @classproperty
     def unfinished_states(self) -> list["TaskRunState"]:
         return [TaskRunState.SCHEDULED, TaskRunState.QUEUED, TaskRunState.RUNNING]
     @classproperty
     def finished_states(self) -> list["TaskRunState"]:
-        return [TaskRunState.FAILED, TaskRunState.SUCCESS]
+        return [TaskRunState.FAILED, TaskRunState.SUCCESS, TaskRunState.SKIPPED]
 
     def __str__(self) -> str:
         return self.value

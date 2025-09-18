@@ -2,23 +2,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone as tz
 from typing import ClassVar, Optional, TYPE_CHECKING
-from dataclasses import field, asdict, KW_ONLY
+from dataclasses import field, KW_ONLY
+
+from logging_mixin import LoggingMixin
 
 if TYPE_CHECKING:
-    from dag import DAG
-
+    from scheduler import ShardingOptions
 from base_row import YtRow, TablePath
-from rows_helpers import make_formatted_select, format_select_columns_multi
-from logging_mixin import LoggingMixin
+from rows_helpers import make_formatted_select, format_select_columns_multi, from_dict, process_filter_value
 from yt_wrapper import with_yt_client
-
 import yt.wrapper as yt
 
 
 @yt.yt_dataclass
 class DagMetaRow(YtRow):
     table_path:  ClassVar[str] = TablePath("dag_meta")
-    key_columns: ClassVar[list[str]] = ["id"]
+    key_columns: ClassVar[str] = ["id"]
     alias: ClassVar[str] = "meta"
 
     id: str = field(default_factory=lambda: yt.common.generate_uuid())
@@ -58,7 +57,6 @@ class DagMeta(DagMetaRow, LoggingMixin):
 class TaskRefRow(YtRow):
     table_path:  ClassVar[str] = TablePath("tasks")
     key_columns: ClassVar[list[str]] = ["dag_id", "task_id"]
-    unique_keys: ClassVar[bool] = False
     alias: ClassVar[str] = "taskref"
 
     _: KW_ONLY
@@ -97,7 +95,7 @@ class TaskRef(TaskRefRow, LoggingMixin):
 @yt.yt_dataclass
 class DagRefRow(YtRow):
     table_path:  ClassVar[str] = TablePath("dags")
-    key_columns: ClassVar[list[str]] = ["dag_id"]
+    key_columns: ClassVar[str] = ["dag_id"]
     alias: ClassVar[str] = "dagref"
 
     _: KW_ONLY
@@ -133,57 +131,46 @@ class DagRef(DagRefRow, LoggingMixin):
 
     @classmethod
     @with_yt_client
-    def dags_needing_dagruns(cls, yt_client: yt.YtClient) -> list:
+    def dags_needing_dagruns(
+            cls, shard: "ShardingOptions", yt_client: yt.YtClient
+    ) -> list[tuple[DagRef.row_type, DagRef.meta_row_type]]:
+        num_virtual_shards, num_shards, shard_index = shard["num_virtual_shards"], shard["num_shards"], shard["shard_index"]
         try:
+            rows = list(yt_client.select_rows(
+                f"""
+                {format_select_columns_multi(cls, cls.meta_row_type, exclude_duplicates=True)}
+                from [{cls.table_path}] as {cls.alias}
+                left join [{cls.meta_row_type.table_path}] as {cls.meta_row_type.alias}
+                on {cls.alias}.dag_id = {cls.meta_row_type.alias}.dag_id
+                where run_id is NULL and (farm_hash(dag_id) % {num_virtual_shards}) % {num_shards} = {shard_index}
+                """,
+                allow_join_without_index=True
+            ))
+            return [(from_dict(DagRef.row_type, row), from_dict(DagRef.meta_row_type, row)) for row in rows]
+        except Exception as e:
+            cls.logger.exception("Failed to select rows for %s: %s", cls.__name__, e)
+            raise
+
+    @classmethod
+    @with_yt_client
+    def dags_needing_dagruns_of_metas(
+            cls, metas: list[str], yt_client: yt.YtClient
+    ) -> list[tuple[DagRef.row_type, DagRef.meta_row_type]]:
+        if not metas:
+            return []
+        try:
+            _, metas = process_filter_value(metas)
             rows = list(yt_client.select_rows(
                 f"""
                 {format_select_columns_multi(cls, cls.meta_row_type, exclude_duplicates=True)}
                 from [{cls.table_path}] as {cls.alias}
                 left join [{cls.meta_row_type.table_path}] as {cls.meta_row_type.alias} 
                 on {cls.alias}.dag_id = {cls.meta_row_type.alias}.dag_id
-                where {cls.meta_row_type.alias}.run_id is NULL
+                where {cls.meta_row_type.alias}.id in {metas} and {cls.meta_row_type.alias}.run_id is NULL 
                 """,
                 allow_join_without_index=True
             ))
+            return [(from_dict(DagRef.row_type, row), from_dict(DagRef.meta_row_type, row)) for row in rows]
         except Exception as e:
             cls.logger.exception("Failed to select rows for %s: %s", cls.__name__, e)
-            return []
-        return rows
-
-    @staticmethod
-    @with_yt_client
-    def try_add_dag(dag: "DAG", yt_client: yt.YtClient) -> (bool, str, str):
-        serialized_repr, payload_hash = dag.to_serialized_repr()
-
-        found = DagRef.get(payload_hash=payload_hash)
-        dag_id = found.dag_id if found else yt.common.generate_uuid()
-
-        meta = DagMeta(dag_id=dag_id)
-        DagMeta.create_rows(rows=meta)
-
-        if not found:
-            dag_ref = DagRef(
-                dag_id=dag_id,
-                serialized_repr=serialized_repr,
-                payload_hash=payload_hash,
-            )
-
-            task_refs = [
-                TaskRef(
-                    task_id=task.task_id,
-                    dag_id=dag_id,
-                    serialized_repr=ser,
-                    payload_hash=phash,
-                )
-                for task in dag.tasks
-                for ser, phash in [task.to_serialized_repr()]
-            ]
-            with yt_client.Transaction(type="tablet"):
-                yt_client.insert_rows(DagRef.table_path, [asdict(dag_ref)])
-                yt_client.insert_rows(TaskRef.table_path, [asdict(task_ref) for task_ref in task_refs])
-                DagMeta.create_rows(rows=meta)
-
-            return True, dag_id, meta.id
-        else:
-            DagMeta.create_rows(rows=meta)
-            return False, dag_id, meta.id
+            raise
