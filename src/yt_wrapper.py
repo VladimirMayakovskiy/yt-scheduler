@@ -26,7 +26,7 @@ def _create_client_cached(proxy: Optional[str], prefix: Optional[str], thread_id
     kwargs = {}
     if proxy:
         kwargs["proxy"] = proxy
-    client = yt.YtClient(**kwargs)
+    client = yt.YtClient(**kwargs, config={"backend": "rpc"})
     if prefix:
         prefix = yt.ypath.YPath(prefix.rstrip("/") + "/")
         yt.ypath.get_config(client)["prefix"] = prefix

@@ -91,18 +91,17 @@ class JobContext:
             jobs[job_id] = row
 
     def get_all_jobs(self, job: JobBase | str | None = None) -> list[_JobRun]:
-        if job is None:
-            with self._lock:
+        with self._lock:
+            if job is None:
                 return list(chain.from_iterable(jobs.values() for jobs in self._active_jobs.values()))
 
-        if isinstance(job, JobBase):
-            job = job.name
-        return list(self._active_jobs.get(job, {}).values())
+            if isinstance(job, JobBase):
+                job = job.name
+            return list(self._active_jobs.get(job, {}).values())
 
     def get_active_jobs(self, job: str | JobBase | None = None) -> list[str]:
         ts = time.time()
-        with self._lock:
-            return [run.job_id for run in self.get_all_jobs(job) if (ts - run.last_seen) <= self._heartbeat_ttl]
+        return [run.job_id for run in self.get_all_jobs(job) if (ts - run.last_seen) <= self._heartbeat_ttl]
 
     def compute_shard_index(self, job: JobBase) -> tuple[int, int]:
         jobs = self.get_active_jobs(job)
@@ -190,7 +189,7 @@ class LightweightJob(JobBase):
 @yt.yt_dataclass
 class _JobRun(YtRow, LoggingMixin):
     table_path:  ClassVar[str] = TablePath("job_state")
-    key_columns: ClassVar[list[str]] = ["job_id"] # todo мне кажется job_id тоже хватит чтоб не засорять
+    key_columns: ClassVar[list[str]] = ["job_id"]
     alias: ClassVar[str] = "job_st"
 
     # job_type: str # todo add
@@ -200,7 +199,7 @@ class _JobRun(YtRow, LoggingMixin):
     last_seen_iso: Optional[str]
     hostname: str
     start_date: Optional[str]
-    end_date: Optional[str]
+    end_date: Optional[str] = None
 
 class ClientContext:
     def __init__(self, agent: "ClientAgent"):
@@ -237,7 +236,6 @@ class JobRunner(ClientContext, LoggingMixin):
         self._started.set()
 
     def _complete_execution(self):
-        self.log.info("COMPLETE EXECUTION")
         self._job._heartbeat_tick(options={"end_date": datetime.now(tz.utc).isoformat()})
 
         self._finished.set()

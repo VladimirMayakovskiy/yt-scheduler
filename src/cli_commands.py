@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import itertools
-
 import yaml
 from typing import Optional, Union, get_type_hints
 from executor import Executor
@@ -111,20 +109,18 @@ def prepare_tables(config):
 
     job_list = JobList().append(
         job_factory(LightweightJob, func=_prepare_tables_impl)
-        # lambda ctx: LightweightJob(ctx, func=_prepare_tables_impl)
     )
     run_command(config=config, jobs=job_list)
 
 def run_scheduler(config):
     job_list = JobList().append(lambda ctx: Executor(ctx)) \
                         .append(lambda ctx: Scheduler(ctx))
-    # job_list = JobList().append(job_factory(Scheduler)) #\
-    #                     # .append(job_factory(Scheduler))
 
     run_command(config=config, jobs=job_list)
 
 @with_yt_client
 def _add_dag_impl(yt_client: yt.YtClient, *, spec: str | dict, work_dir: str = None):
+    work_dir = work_dir or "//tmp"
     try:
         if isinstance(spec, str):
             spec_path = spec
@@ -155,6 +151,5 @@ def add_dag(*, config, spec: str | dict, work_dir: str = None):
 
     job_list = JobList().append(
         job_factory(LightweightJob, func=lambda: _add_dag_impl(spec=spec, work_dir=work_dir))
-        # lambda ctx: LightweightJob(ctx, func=lambda: _add_dag_impl(spec=spec, work_dir=work_dir))
     )
     run_command(config=config, jobs=job_list)

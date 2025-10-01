@@ -135,7 +135,6 @@ class Scheduler(JobBase, CallbackMixin):
                 self._stop_event.wait(self._scheduler_idle_sleep_time)
 
     def _loop_iter(self):
-        self.log.info("\n\nONE STEP OF SCHEDULER LOOP")
         self._do_scheduling()
         self._drain_callbacks()
         with self._created_dagruns_lock:

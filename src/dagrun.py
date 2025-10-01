@@ -222,10 +222,10 @@ class DagRun(DagRunRow, LoggingMixin):
         finished_trs: list[TaskRun],
     ):
         ready_trs: list[TaskRun] = []
-        finished_trs_ids = {ti.run_id for ti in finished_trs}
+        finished_trs_ids = {ti.task_id for ti in finished_trs}
 
         for ti in schedulable_trs:
-            upstream = (set(task.upstream_task_ids) for task in [dag.task_dict.get(ti.task_id, None)] if task) or set()
+            upstream = set().union(*(set(task.upstream_task_ids) for task in [dag.task_dict.get(ti.task_id, None)] if task)) or set()
             if upstream.issubset(finished_trs_ids):
                 ready_trs.append(ti)
         return ready_trs
