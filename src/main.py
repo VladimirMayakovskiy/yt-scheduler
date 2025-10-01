@@ -9,6 +9,10 @@ def main_func():
 
     args, unrecognized = parser.parse_known_args()
 
+    if not hasattr(args, "func"):
+        parser.print_help()
+        sys.exit(1)
+
     if unrecognized:
         print(unrecognized)
         args, _ = parser.parse_known_args(unrecognized, namespace=args)
@@ -22,7 +26,7 @@ def main_func():
     processed_keys = [
         "func",
         "proxy",
-        "config", # todo
+        "config",
     ]
 
     for key in processed_keys:

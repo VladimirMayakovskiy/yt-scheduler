@@ -7,19 +7,35 @@ from yt.wrapper.mappings import VerifiedDict
 
 class DefaultConfigType(TypedDict, total=False):
     class DefaultConfigProxyType(TypedDict, total=False):
-        url: str = ""
+        url: str
 
     proxy: DefaultConfigProxyType
-    config_path: Optional[str]
-    default_work_dir: Optional[str]
-    # todo
+    config_path: str
+    default_work_dir: str
+
+    # class DefaultConfigExecutorType(TypedDict, total=False):
+    #     poll_interval: float
+    #     task_start_interval: float
+    #
+    # executor: DefaultConfigExecutorType
+    #
+    # class DefaultConfigSchedulerType(TypedDict, total=False):
+    #     poll_interval: float
+    #
+    # scheduler: DefaultConfigSchedulerType
+    #
+    # class DefaultConfigPoolType(TypedDict, total=False):
+    #     max_thread_count: int
+    #     unordered: bool # todo
+    #
+    # pool: DefaultConfigPoolType
 
 default_config = {
     "proxy": {
         "url": None,
     },
     "default_work_dir": "//tmp/",
-}
+} # todo add fields
 
 def get_default_config() -> VerifiedDict:
     default_template = deepcopy(yt_default_config.get_default_config())

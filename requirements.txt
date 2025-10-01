@@ -1,3 +1,4 @@
 pyyaml
 ytsaurus-client
 ytsaurus-yson
+pytest

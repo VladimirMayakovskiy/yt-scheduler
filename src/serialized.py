@@ -144,7 +144,7 @@ class SerializedObject:
         return cls.deserialize(serialized_obj)
 
 class SerializedTask(Task, SerializedObject):
-    _constructor_initialize_fields = [("succeeding_task_ids", set()), ("preceding_task_ids", set())]
+    _constructor_initialize_fields = [("succeeding_task_ids", set), ("preceding_task_ids", set)]
     _decorated_fields = {}
     _serialize_fields = ["task_id", "operation_type", "spec_builder._user_spec"]
 
@@ -186,7 +186,7 @@ class SerializedTask(Task, SerializedObject):
         for k, v in cls._constructor_initialize_fields:
             if k in encoded_op:
                 continue
-            object.__setattr__(operator, k, v)
+            object.__setattr__(operator, k, v() if callable(v) else v)
 
         return operator
 

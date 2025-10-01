@@ -20,7 +20,7 @@ class TablePath:
 class YtRow:
     _config: ClassVar[Config]
     table_path: ClassVar[str]
-    key_columns: ClassVar[list[str]]
+    key_columns: ClassVar[str | list[str]]
     unique_keys: ClassVar[bool] = True
     alias: ClassVar[str]
     row_type: ClassVar[type[T]]
@@ -46,11 +46,12 @@ class YtRow:
 
     @classmethod
     @with_yt_client
-    def create_rows(cls: type[T], rows: T.row_type | list[T.row_type] | tuple[T.row_type], yt_client: yt.YtClient):
+    def upsert_rows(cls: type[T], rows: T.row_type | list[T.row_type] | tuple[T.row_type], yt_client: yt.YtClient):
         if not isinstance(rows, (list, tuple)):
             rows = [rows]
         try:
-            yt_client.insert_rows(cls.row_type.table_path, [dataclasses.asdict(row) for row in rows])
+            row_type = cls.row_type if hasattr(cls, "row_type") else cls
+            yt_client.insert_rows(row_type.table_path, [dataclasses.asdict(row) for row in rows], update=True)
         except Exception as e:
             cls.logger.exception("Failed to insert rows %r: %s", rows, e)
             raise
